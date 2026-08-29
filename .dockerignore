@@ -1,0 +1,16 @@
+node_modules
+**/node_modules
+**/dist
+**/build
+.git
+.env
+.env.*
+!.env.example
+**/*.log
+# The Mini App is not part of this image, but its manifest is: bun's
+# --frozen-lockfile compares workspace membership against the lockfile, and a
+# missing member reads as "the lockfile changed".
+packages/client/*
+!packages/client/package.json
+docs
+tools

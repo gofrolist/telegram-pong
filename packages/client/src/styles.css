@@ -1,0 +1,332 @@
+/*
+ * Styling.
+ *
+ * Everything colour-related comes from Telegram's theme params, published as
+ * CSS variables by `bindThemeParamsCssVars()`. Fallbacks are supplied for
+ * every one of them, because an older Telegram client may not send the whole
+ * palette and a missing variable would otherwise render text on its own colour.
+ *
+ * Safe-area insets come from `bindViewportCssVars()`. On a phone with a home
+ * indicator, the paddle track sits exactly where the system gesture area is,
+ * so the bottom inset is not cosmetic.
+ */
+
+:root {
+  --bg: var(--tg-theme-bg-color, #10131a);
+  --surface: var(--tg-theme-secondary-bg-color, #181c25);
+  --text: var(--tg-theme-text-color, #f2f4f8);
+  --hint: var(--tg-theme-hint-color, #8a92a3);
+  --accent: var(--tg-theme-button-color, #4a9cff);
+  --accent-text: var(--tg-theme-button-text-color, #ffffff);
+  --danger: var(--tg-theme-destructive-text-color, #e2604a);
+
+  --safe-top: var(--tg-viewport-safe-area-inset-top, 0px);
+  --safe-bottom: var(--tg-viewport-safe-area-inset-bottom, 0px);
+  --content-top: var(--tg-viewport-content-safe-area-inset-top, 0px);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  /* The page itself never scrolls. A drag that scrolls the page is a drag
+     that does not move the paddle, and on iOS it can dismiss the Mini App. */
+  overscroll-behavior: none;
+}
+
+#root {
+  height: 100%;
+}
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 100%;
+  padding: calc(16px + var(--safe-top) + var(--content-top)) 16px calc(16px + var(--safe-bottom));
+  overflow-y: auto;
+}
+
+.screen--centered {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.screen__title {
+  margin: 0;
+  font-size: 32px;
+  font-weight: 800;
+}
+
+.screen__tagline {
+  margin: 4px 0 0;
+  color: var(--hint);
+}
+
+.button {
+  appearance: none;
+  border: none;
+  border-radius: 12px;
+  padding: 14px 20px;
+  font-size: 16px;
+  font-weight: 600;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  /* Minimum comfortable tap target; a 32px button is a miss on a phone. */
+  min-height: 48px;
+}
+
+.button--primary {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.button--quiet {
+  background: transparent;
+  color: var(--hint);
+}
+
+.button:disabled {
+  opacity: 0.55;
+}
+
+.card {
+  background: var(--surface);
+  border-radius: 16px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.card__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--hint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.card__text {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.card__text--muted {
+  color: var(--hint);
+}
+
+.card__link {
+  display: block;
+  word-break: break-all;
+  font-size: 13px;
+  color: var(--hint);
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin: 0;
+}
+
+.stats__item dt {
+  font-size: 13px;
+  color: var(--hint);
+}
+
+.stats__item dd {
+  margin: 2px 0 0;
+  font-size: 22px;
+  font-weight: 700;
+  /* Digits from Intl.NumberFormat should not reflow as they change. */
+  font-variant-numeric: tabular-nums;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.list__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.list__rank {
+  color: var(--hint);
+  font-variant-numeric: tabular-nums;
+  min-width: 2.5em;
+}
+
+.list__name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list__value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.error {
+  color: var(--danger);
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Match                                                               */
+/* ------------------------------------------------------------------ */
+
+.match {
+  position: relative;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.match__canvas {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  display: block;
+  /* The single most important line in this file: without it, dragging the
+     paddle scrolls the page and, on iOS, pulls the Mini App closed. */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.match__overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  /* The overlay is informational; the canvas underneath keeps receiving
+     pointer events so a returning player's finger is already tracking. */
+  pointer-events: none;
+}
+
+.match__overlay-title {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.match__overlay-text {
+  color: var(--hint);
+}
+
+.match__overlay-countdown {
+  font-variant-numeric: tabular-nums;
+  color: var(--hint);
+}
+
+.match__leave {
+  position: absolute;
+  top: calc(8px + var(--safe-top) + var(--content-top));
+  right: 12px;
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--hint);
+  font-size: 13px;
+  padding: 10px;
+  cursor: pointer;
+}
+
+/* ------------------------------------------------------------------ */
+/* Result                                                              */
+/* ------------------------------------------------------------------ */
+
+.result__headline {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 800;
+}
+
+.result__score {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 72px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.result__score-value--muted {
+  color: var(--hint);
+}
+
+.result__score-separator {
+  color: var(--hint);
+}
+
+.result__detail {
+  margin: 0;
+  color: var(--hint);
+}
+
+/* ------------------------------------------------------------------ */
+/* Debug probe                                                         */
+/* ------------------------------------------------------------------ */
+
+.debug__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.debug__table th,
+.debug__table td {
+  text-align: left;
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--surface);
+  vertical-align: top;
+  word-break: break-all;
+}
+
+.debug__table th {
+  color: var(--hint);
+  font-weight: 600;
+  width: 40%;
+}
+
+.debug__highlight {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.debug__raw {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 12px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+}

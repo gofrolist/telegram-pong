@@ -1,0 +1,80 @@
+{
+  "app": {
+    "title": "Понг",
+    "openInTelegram": "Откройте игру в Telegram, чтобы играть.",
+    "loading": "Загрузка…",
+    "retry": "Попробовать снова",
+    "error": "Что-то пошло не так."
+  },
+  "home": {
+    "tagline": "Двое игроков. Один мяч. Никаких ботов.",
+    "play": "Начать матч",
+    "creating": "Открываем комнату…",
+    "shareInvite": "Отправить приглашение",
+    "inviteReady": "Комната открыта. Отправьте приглашение — соперником станет тот, кто нажмёт первым.",
+    "copyLink": "Скопировать ссылку",
+    "copied": "Скопировано",
+    "waitingForOpponent": "Ждём соперника",
+    "waitingHint": "Можно закрыть приложение — мы напишем, как только кто-нибудь зайдёт.",
+    "roomExpired": "Это приглашение больше не действует.",
+    "startYourOwn": "Начать свой матч",
+    "tooManyRooms": "Вы открыли слишком много комнат. Попробуйте чуть позже."
+  },
+  "match": {
+    "connecting": "Подключение…",
+    "countdown_one": "{{count}}",
+    "countdown_few": "{{count}}",
+    "countdown_many": "{{count}}",
+    "countdown_other": "{{count}}",
+    "go": "Начали",
+    "you": "Вы",
+    "opponent": "Соперник",
+    "paused": "Матч на паузе",
+    "opponentDisconnected": "Соперник потерял связь",
+    "youDisconnected": "Переподключение…",
+    "reconnectIn": "Продолжим или засчитаем поражение через {{seconds}} с",
+    "reconnected": "Связь есть. Продолжаем…",
+    "dragToMove": "Ведите пальцем внизу экрана",
+    "leave": "Выйти из матча",
+    "leaveConfirm": "Выход засчитывается как поражение."
+  },
+  "result": {
+    "youWon": "Вы выиграли",
+    "youLost": "Вы проиграли",
+    "wonByForfeit": "Победа — соперник вышел",
+    "lostByForfeit": "Поражение — вы вышли",
+    "wonByDisconnect": "Победа — соперник не вернулся",
+    "lostByDisconnect": "Поражение — вы не вернулись",
+    "share": "Поделиться результатом",
+    "sharing": "Готовим…",
+    "shareFailed": "Не удалось открыть окно отправки.",
+    "rematch": "Реванш",
+    "rematchOpening": "Открываем реванш…",
+    "longestRally": "Самое долгое ралли",
+    "hits_one": "{{count}} удар",
+    "hits_few": "{{count}} удара",
+    "hits_many": "{{count}} ударов",
+    "hits_other": "{{count}} ударов",
+    "backHome": "На главную"
+  },
+  "stats": {
+    "title": "Ваша статистика",
+    "matches": "Матчей",
+    "winRate": "Побед",
+    "longestRally": "Самое долгое ралли",
+    "bestStreak": "Лучшая серия",
+    "headToHead": "Личные встречи",
+    "noOpponents": "Матчей пока нет. Позовите кого-нибудь.",
+    "record": "{{mine}}:{{theirs}}",
+    "chatLeaderboard": "Этот чат",
+    "chatLeaderboardUnavailable": "Откройте игру по ссылке из чата, чтобы увидеть таблицу этого чата.",
+    "chatSolo": "Таблица чата работает только в групповых чатах.",
+    "wins": "Побед",
+    "rank": "#{{position}}"
+  },
+  "settings": {
+    "language": "Язык",
+    "languageEn": "English",
+    "languageRu": "Русский"
+  }
+}

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      `viewport-fit=cover` lets the field reach the physical screen edges;
+      the safe-area insets Telegram publishes keep the UI out of the notch.
+      `user-scalable=no` stops a two-finger rally from zooming the page.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>Pong</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <!--
+      Telegram's own telegram-web-app.js is deliberately NOT loaded here.
+      Mixing it with the @telegram-apps packages causes subtle failures.
+    -->
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

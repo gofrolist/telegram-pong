@@ -1,0 +1,53 @@
+# Local development stack.
+#
+# Postgres here stands in for Neon. It is NOT a faithful stand-in in one
+# important way: it never scales to zero, so it never exhibits the cold-start
+# latency that shaped `db/client.ts`. Do not conclude from a green local run
+# that the first query after an idle night is fast.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: pong
+      POSTGRES_PASSWORD: pong
+      POSTGRES_DB: pong
+    ports:
+      - '5432:5432'
+    volumes:
+      - pong-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U pong -d pong']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '2567:2567'
+    environment:
+      NODE_ENV: development
+      PORT: '2567'
+      DATABASE_URL: postgresql://pong:pong@postgres:5432/pong
+      # Everything below must be supplied — see .env.example. Compose reads
+      # them from a `.env` file beside this one.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME}
+      TELEGRAM_APP_NAME: ${TELEGRAM_APP_NAME:-pong}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET}
+      PUBLIC_SERVER_URL: ${PUBLIC_SERVER_URL}
+      PUBLIC_CLIENT_URL: ${PUBLIC_CLIENT_URL:-https://localhost:5173}
+      SESSION_SECRET: ${SESSION_SECRET}
+      CHAT_LEADERBOARDS_ENABLED: ${CHAT_LEADERBOARDS_ENABLED:-false}
+      # Set to 75 to develop against a 150ms round trip — see the netcode
+      # section of the README.
+      COLYSEUS_LATENCY: ${COLYSEUS_LATENCY:-}
+
+volumes:
+  pong-pgdata:

@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+*.log
+.DS_Store
+.turbo/
+coverage/
+.vercel/
+.fly/
+
+# Python tooling for the offline cheat-detection job
+tools/**/.venv/
+tools/**/__pycache__/

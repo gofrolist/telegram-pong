@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "build",
+    "rootDir": "src",
+    "moduleResolution": "bundler",
+    "declaration": false,
+    "sourceMap": true
+  },
+  "include": ["src"]
+}

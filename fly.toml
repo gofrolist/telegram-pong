@@ -1,0 +1,46 @@
+# fly.io deployment: exactly one machine.
+#
+# Pong load is negligible and one machine holds hundreds of concurrent rooms.
+# A second machine would add a routing problem (which machine owns this room?)
+# before it added any capacity, so the design keeps the seam — a room code
+# carries its machine id — without building the routing.
+
+app = 'telegram-pong'
+primary_region = 'fra'   # Colocate with the Neon region. See the README.
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  PORT = '2567'
+  NODE_ENV = 'production'
+
+[http_service]
+  internal_port = 2567
+  force_https = true
+
+  # THE two lines that matter. A Colyseus room lives in the memory of one
+  # machine: if fly stops it, every open invite and every live match dies with
+  # it, and a room whose invite is tapped an hour later must still be there.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = 'connections'
+    soft_limit = 400
+    hard_limit = 600
+
+  [[http_service.checks]]
+    interval = '15s'
+    timeout = '4s'
+    grace_period = '20s'
+    method = 'GET'
+    path = '/healthz'
+    # Deliberately does not touch the database: a cold Neon compute takes
+    # seconds to wake, and a health check that waited on one would fail the
+    # deploy after a quiet night.
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'

@@ -1,0 +1,76 @@
+{
+  "app": {
+    "title": "Pong",
+    "openInTelegram": "Open this in Telegram to play.",
+    "loading": "Loading…",
+    "retry": "Try again",
+    "error": "Something went wrong."
+  },
+  "home": {
+    "tagline": "Two players. One ball. No bots.",
+    "play": "Start a match",
+    "creating": "Opening a room…",
+    "shareInvite": "Share invite",
+    "inviteReady": "Room is open. Send the invite — whoever taps it first is your opponent.",
+    "copyLink": "Copy link",
+    "copied": "Copied",
+    "waitingForOpponent": "Waiting for an opponent",
+    "waitingHint": "You can close the app. We'll message you the moment someone joins.",
+    "roomExpired": "That invite is no longer open.",
+    "startYourOwn": "Start your own match",
+    "tooManyRooms": "You've opened a lot of rooms. Try again a little later."
+  },
+  "match": {
+    "connecting": "Connecting…",
+    "countdown_one": "{{count}}",
+    "countdown_other": "{{count}}",
+    "go": "Go",
+    "you": "You",
+    "opponent": "Opponent",
+    "paused": "Match paused",
+    "opponentDisconnected": "Opponent lost connection",
+    "youDisconnected": "Reconnecting…",
+    "reconnectIn": "Resuming or forfeiting in {{seconds}}s",
+    "reconnected": "Back. Resuming…",
+    "dragToMove": "Drag along the bottom to move",
+    "leave": "Leave match",
+    "leaveConfirm": "Leaving forfeits the match."
+  },
+  "result": {
+    "youWon": "You won",
+    "youLost": "You lost",
+    "wonByForfeit": "Won — opponent left",
+    "lostByForfeit": "Lost — you left",
+    "wonByDisconnect": "Won — opponent didn't reconnect",
+    "lostByDisconnect": "Lost — you didn't reconnect",
+    "share": "Share result",
+    "sharing": "Preparing…",
+    "shareFailed": "Couldn't open the share sheet.",
+    "rematch": "Rematch",
+    "rematchOpening": "Opening a rematch…",
+    "longestRally": "Longest rally",
+    "hits_one": "{{count}} hit",
+    "hits_other": "{{count}} hits",
+    "backHome": "Home"
+  },
+  "stats": {
+    "title": "Your stats",
+    "matches": "Matches",
+    "winRate": "Win rate",
+    "longestRally": "Longest rally",
+    "bestStreak": "Best streak",
+    "headToHead": "Head to head",
+    "noOpponents": "No matches yet. Invite someone.",
+    "record": "{{mine}}:{{theirs}}",
+    "chatLeaderboard": "This chat",
+    "chatLeaderboardUnavailable": "Open the game from a chat link to see that chat's leaderboard.",
+    "chatSolo": "Chat leaderboards need a group chat.",
+    "wins": "Wins",
+    "rank": "#{{position}}"
+  },
+  "settings": {
+    "language": "Language",
+    "languageEn": "English",
+    "languageRu": "Русский"
+  }
+}
