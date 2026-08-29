@@ -160,50 +160,59 @@ async function updateProfileStats(
   loserId: number,
   longestRally: number,
 ): Promise<void> {
-  await tx
-    .insert(playerStats)
-    .values({
-      userId: winnerId,
-      game,
-      matches: 1,
-      wins: 1,
-      longestRally,
-      bestStreak: 1,
-      currentStreak: 1,
-      updatedAt: new Date(),
-    })
-    .onConflictDoUpdate({
-      target: [playerStats.userId, playerStats.game],
-      set: {
-        matches: sql`${playerStats.matches} + 1`,
-        wins: sql`${playerStats.wins} + 1`,
-        longestRally: sql`greatest(${playerStats.longestRally}, ${longestRally})`,
-        currentStreak: sql`${playerStats.currentStreak} + 1`,
-        bestStreak: sql`greatest(${playerStats.bestStreak}, ${playerStats.currentStreak} + 1)`,
-        updatedAt: new Date(),
-      },
-    });
+  // Lock the two rows in ascending user-id order, never winner-then-loser.
+  // Two rooms between the same pair can finish at the same moment with
+  // opposite winners; ordering by outcome makes them take the same two locks
+  // in opposite orders, Postgres aborts one on deadlock, `tryWrite` swallows
+  // it, and a match that was actually played gets no row, no stats and no
+  // card. `updateHeadToHead` already normalises via `orderPair` — this is the
+  // same discipline applied to the tables that were missing it.
+  for (const userId of ascending(winnerId, loserId)) {
+    await upsertPlayerStats(tx, game, userId, userId === winnerId, longestRally);
+  }
+}
 
+/** The two ids in a canonical order, so every transaction locks them alike. */
+function ascending(a: number, b: number): [number, number] {
+  return a <= b ? [a, b] : [b, a];
+}
+
+async function upsertPlayerStats(
+  tx: Tx,
+  game: string,
+  userId: number,
+  won: boolean,
+  longestRally: number,
+): Promise<void> {
   await tx
     .insert(playerStats)
     .values({
-      userId: loserId,
+      userId,
       game,
       matches: 1,
-      wins: 0,
+      wins: won ? 1 : 0,
       longestRally,
-      bestStreak: 0,
-      currentStreak: 0,
+      bestStreak: won ? 1 : 0,
+      currentStreak: won ? 1 : 0,
       updatedAt: new Date(),
     })
     .onConflictDoUpdate({
       target: [playerStats.userId, playerStats.game],
-      set: {
-        matches: sql`${playerStats.matches} + 1`,
-        longestRally: sql`greatest(${playerStats.longestRally}, ${longestRally})`,
-        currentStreak: 0,
-        updatedAt: new Date(),
-      },
+      set: won
+        ? {
+            matches: sql`${playerStats.matches} + 1`,
+            wins: sql`${playerStats.wins} + 1`,
+            longestRally: sql`greatest(${playerStats.longestRally}, ${longestRally})`,
+            currentStreak: sql`${playerStats.currentStreak} + 1`,
+            bestStreak: sql`greatest(${playerStats.bestStreak}, ${playerStats.currentStreak} + 1)`,
+            updatedAt: new Date(),
+          }
+        : {
+            matches: sql`${playerStats.matches} + 1`,
+            longestRally: sql`greatest(${playerStats.longestRally}, ${longestRally})`,
+            currentStreak: 0,
+            updatedAt: new Date(),
+          },
     });
 }
 
@@ -225,45 +234,35 @@ async function updateChatLeaderboard(
     .values({ chatInstance, lastMatchAt: new Date() })
     .onConflictDoNothing();
 
-  await tx
-    .insert(chatLeaderboard)
-    .values({
-      chatInstance,
-      game,
-      userId: winnerId,
-      wins: 1,
-      losses: 0,
-      matches: 1,
-      lastMatchAt: new Date(),
-    })
-    .onConflictDoUpdate({
-      target: [chatLeaderboard.chatInstance, chatLeaderboard.game, chatLeaderboard.userId],
-      set: {
-        wins: sql`${chatLeaderboard.wins} + 1`,
-        matches: sql`${chatLeaderboard.matches} + 1`,
+  // Ascending user-id order, for the deadlock reason in `updateProfileStats`.
+  for (const userId of ascending(winnerId, loserId)) {
+    const won = userId === winnerId;
+    await tx
+      .insert(chatLeaderboard)
+      .values({
+        chatInstance,
+        game,
+        userId,
+        wins: won ? 1 : 0,
+        losses: won ? 0 : 1,
+        matches: 1,
         lastMatchAt: new Date(),
-      },
-    });
-
-  await tx
-    .insert(chatLeaderboard)
-    .values({
-      chatInstance,
-      game,
-      userId: loserId,
-      wins: 0,
-      losses: 1,
-      matches: 1,
-      lastMatchAt: new Date(),
-    })
-    .onConflictDoUpdate({
-      target: [chatLeaderboard.chatInstance, chatLeaderboard.game, chatLeaderboard.userId],
-      set: {
-        losses: sql`${chatLeaderboard.losses} + 1`,
-        matches: sql`${chatLeaderboard.matches} + 1`,
-        lastMatchAt: new Date(),
-      },
-    });
+      })
+      .onConflictDoUpdate({
+        target: [chatLeaderboard.chatInstance, chatLeaderboard.game, chatLeaderboard.userId],
+        set: won
+          ? {
+              wins: sql`${chatLeaderboard.wins} + 1`,
+              matches: sql`${chatLeaderboard.matches} + 1`,
+              lastMatchAt: new Date(),
+            }
+          : {
+              losses: sql`${chatLeaderboard.losses} + 1`,
+              matches: sql`${chatLeaderboard.matches} + 1`,
+              lastMatchAt: new Date(),
+            },
+      });
+  }
 }
 
 /** Flag a room as filled and remember when, for the "opponent waiting" nudge. */

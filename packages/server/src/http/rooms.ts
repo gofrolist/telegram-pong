@@ -27,9 +27,18 @@ const KNOWN_GAMES = new Set(['pong']);
  */
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 function randomCode(length = 8): string {
-  const bytes = randomBytes(length);
+  // Rejection sampling, not `% ALPHABET.length`: 256 is not a multiple of 31,
+  // so a plain modulo draws the first eight letters 9/256 of the time against
+  // 8/256 for the rest. The code is the only secret protecting an open room.
+  const limit = 256 - (256 % ALPHABET.length);
   let out = '';
-  for (let i = 0; i < length; i++) out += ALPHABET[bytes[i]! % ALPHABET.length];
+  while (out.length < length) {
+    for (const byte of randomBytes(length)) {
+      if (byte >= limit) continue;
+      out += ALPHABET[byte % ALPHABET.length];
+      if (out.length === length) break;
+    }
+  }
   return out;
 }
 
@@ -47,6 +56,13 @@ export interface CreatedRoom {
   roomCode: string;
   /** Colyseus' own id, which the client passes to `joinById`. */
   colyseusRoomId: string;
+  /**
+   * Whether the `rooms` row was actually written.
+   *
+   * `false` means the room is live and joinable by id, but its *code* — and
+   * therefore the invite link — cannot be resolved by anyone else.
+   */
+  persisted: boolean;
 }
 
 export class UnknownGameError extends Error {}
@@ -79,7 +95,19 @@ export async function createRoom(input: CreateRoomInput): Promise<CreatedRoom> {
 
   const room = await matchMaker.createRoom(input.game, createOptions);
 
-  await tryWrite('createRoom', () =>
+  // This row is not bookkeeping — it is the only thing that can turn the code
+  // in the invite link back into a joinable room, so a swallowed failure here
+  // hands the host a link every recipient's `GET /api/rooms/:code` will 404 on
+  // forever.
+  //
+  // It is deliberately still not fatal: the platform's standing commitment
+  // (asserted by `netcode.integration.test.ts`, which runs against an
+  // unreachable database on purpose) is that a database outage degrades stats
+  // rather than breaking a match, and the host can still play through the
+  // `colyseusRoomId` returned below. What was wrong was that the failure was
+  // silent — `persisted` lets the caller say so instead of promising a link
+  // that cannot work.
+  const written = await tryWrite('createRoom', () =>
     db.insert(rooms).values({
       id: roomCode,
       colyseusRoomId: room.roomId,
@@ -93,7 +121,20 @@ export async function createRoom(input: CreateRoomInput): Promise<CreatedRoom> {
     }),
   );
 
-  return { roomCode, colyseusRoomId: room.roomId };
+  return { roomCode, colyseusRoomId: room.roomId, persisted: written !== null };
+}
+
+/**
+ * Shut a room down and close its row.
+ *
+ * Used when a room was allocated for a flow that then failed: an invite nobody
+ * will ever receive still costs a fixed timestep for the full hour of its TTL.
+ */
+export async function closeRoom(room: CreatedRoom): Promise<void> {
+  await matchMaker.remoteRoomCall(room.colyseusRoomId, 'disconnect').catch(() => {});
+  await tryWrite('closeRoom', () =>
+    db.update(rooms).set({ status: 'closed' }).where(eq(rooms.id, room.roomCode)),
+  );
 }
 
 export interface ResolvedRoom {

@@ -104,6 +104,15 @@ export function pointerToFieldX(clientX: number, canvas: HTMLCanvasElement, mirr
   return mirrored ? FIELD_W - fieldX : fieldX;
 }
 
+/**
+ * A filled rounded rectangle, without depending on `CanvasRenderingContext2D
+ * .roundRect`.
+ *
+ * `roundRect` is Safari 16+, and Telegram's webview on iOS 15 does not have
+ * it. Calling a missing method here throws inside `requestAnimationFrame`,
+ * which does not merely lose the paddles — it kills the render loop, so the
+ * field goes blank and stays blank for the whole match.
+ */
 function roundedRect(
   context: CanvasRenderingContext2D,
   x: number,
@@ -113,7 +122,17 @@ function roundedRect(
   radius: number,
 ): void {
   context.beginPath();
-  context.roundRect(x, y, width, height, radius);
+  if (typeof context.roundRect === 'function') {
+    context.roundRect(x, y, width, height, radius);
+  } else {
+    const r = Math.min(radius, width / 2, height / 2);
+    context.moveTo(x + r, y);
+    context.arcTo(x + width, y, x + width, y + height, r);
+    context.arcTo(x + width, y + height, x, y + height, r);
+    context.arcTo(x, y + height, x, y, r);
+    context.arcTo(x, y, x + width, y, r);
+    context.closePath();
+  }
   context.fill();
 }
 

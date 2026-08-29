@@ -24,7 +24,7 @@ import {
   type SessionToken,
 } from '../telegram/initData.js';
 import { consumeRoomCreationBudget, recordLaunch, setLanguageOverride } from '../users.js';
-import { createRoom, resolveRoom, UnknownGameError } from './rooms.js';
+import { closeRoom, createRoom, resolveRoom, UnknownGameError } from './rooms.js';
 import {
   getChatLeaderboard,
   getHeadToHead,
@@ -100,6 +100,20 @@ function handler(
       if (!res.headersSent) res.status(500).json({ error: 'internal_error' });
     });
   };
+}
+
+/**
+ * Is this a well-formed UUID?
+ *
+ * `matches.id` is a `uuid` column, so an id that is merely a string reaches
+ * Postgres as `22P02 invalid input syntax for type uuid` — a 500 where the
+ * caller deserves a 400, and (on `POST /rooms`) after their hourly
+ * room-creation budget has already been spent on a request that creates
+ * nothing.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
 }
 
 export function mountApi(app: Application): void {
@@ -217,21 +231,39 @@ export function mountApi(app: Application): void {
       const session = req.session!;
       const game = typeof req.body?.game === 'string' ? req.body.game : 'pong';
 
-      if (!(await consumeRoomCreationBudget(session.uid))) {
-        res.status(429).json({ error: 'too_many_rooms' });
+      const rematchOfMatchId =
+        typeof req.body?.rematchOfMatchId === 'string' ? req.body.rematchOfMatchId : null;
+      // Validated before the budget is consumed: a client with a stale id
+      // should not burn its hourly quota on requests that cannot succeed.
+      if (rematchOfMatchId !== null && !isUuid(rematchOfMatchId)) {
+        res.status(400).json({ error: 'bad_match_id' });
         return;
       }
 
-      const rematchOfMatchId =
-        typeof req.body?.rematchOfMatchId === 'string' ? req.body.rematchOfMatchId : null;
       let expectedGuestUserId: number | null = null;
       if (rematchOfMatchId) {
         const match = await getMatch(rematchOfMatchId);
-        if (match) {
-          // A rematch is addressed to the person you just played.
-          expectedGuestUserId =
-            match.playerAId === session.uid ? match.playerBId : match.playerAId;
+        if (!match) {
+          res.status(404).json({ error: 'match_not_found' });
+          return;
         }
+        // Only the two people who played a match may open a rematch of it.
+        // Without this, a stranger silently reserves the room's second seat
+        // for `match.playerAId` and stamps `rooms.rematch_of_match_id` with
+        // someone else's match, forging the rematch attribution the whole
+        // retention funnel is measured on.
+        if (match.playerAId !== session.uid && match.playerBId !== session.uid) {
+          res.status(403).json({ error: 'not_a_participant' });
+          return;
+        }
+        // A rematch is addressed to the person you just played.
+        expectedGuestUserId =
+          match.playerAId === session.uid ? match.playerBId : match.playerAId;
+      }
+
+      if (!(await consumeRoomCreationBudget(session.uid))) {
+        res.status(429).json({ error: 'too_many_rooms' });
+        return;
       }
 
       try {
@@ -249,11 +281,16 @@ export function mountApi(app: Application): void {
           ref: session.uid,
         });
 
+        // An unpersisted room is joinable by id but its code resolves to
+        // nothing, so there is no invite link to give out. Say so rather than
+        // handing back a URL that 404s for every recipient.
         res.json({
           ...room,
           origin: MatchOrigin.INVITE,
-          startParam,
-          inviteUrl: `https://t.me/${config.TELEGRAM_BOT_USERNAME}/${config.TELEGRAM_APP_NAME}?startapp=${startParam}`,
+          startParam: room.persisted ? startParam : null,
+          inviteUrl: room.persisted
+            ? `https://t.me/${config.TELEGRAM_BOT_USERNAME}/${config.TELEGRAM_APP_NAME}?startapp=${startParam}`
+            : null,
         });
       } catch (error) {
         if (error instanceof UnknownGameError) {
@@ -352,7 +389,12 @@ export function mountApi(app: Application): void {
     requireSession,
     handler(async (req, res) => {
       const session = req.session!;
-      const match = await getMatch(String(req.params.matchId));
+      const matchId = String(req.params.matchId);
+      if (!isUuid(matchId)) {
+        res.status(400).json({ error: 'bad_match_id' });
+        return;
+      }
+      const match = await getMatch(matchId);
       if (!match) {
         res.status(404).json({ error: 'match_not_found' });
         return;
@@ -380,6 +422,16 @@ export function mountApi(app: Application): void {
       // Every result screen and every shared card carries a rematch button —
       // it is the retention mechanic that matters, so the room is opened here
       // rather than when the recipient taps.
+      //
+      // Under the same budget as `POST /rooms`: a `PongRoom` sets
+      // `autoDispose = false` and runs a 30Hz fixed timestep for a full hour,
+      // so an unmetered room-per-tap here is a CPU and memory DoS from one
+      // authenticated account.
+      if (!(await consumeRoomCreationBudget(session.uid))) {
+        res.status(429).json({ error: 'too_many_rooms' });
+        return;
+      }
+
       const rematchRoom = await createRoom({
         game: match.game,
         hostUserId: session.uid,
@@ -411,6 +463,9 @@ export function mountApi(app: Application): void {
       });
 
       if (!prepared) {
+        // The card never got made, so nobody will ever tap this room's invite.
+        // Leaving it running would leak a live room on every share failure.
+        void closeRoom(rematchRoom);
         void recordEvent({
           name: 'share_message_failed',
           userId: session.uid,
@@ -449,12 +504,21 @@ export function mountApi(app: Application): void {
         res.status(400).json({ error: 'unknown_event' });
         return;
       }
+      const matchId = typeof req.body?.matchId === 'string' ? req.body.matchId : undefined;
+      // `events.match_id` is a `uuid` column and events are inserted in
+      // batches: one unparseable id poisons the whole batch, and because the
+      // batch is spliced off the queue before the insert, up to fifty
+      // unrelated funnel rows — other users' included — are lost with it.
+      if (matchId !== undefined && !isUuid(matchId)) {
+        res.status(400).json({ error: 'bad_match_id' });
+        return;
+      }
       await recordEvent({
         name: name as never,
         userId: req.session!.uid,
         chatInstance: req.session!.ci,
         game: typeof req.body?.game === 'string' ? req.body.game : 'pong',
-        matchId: typeof req.body?.matchId === 'string' ? req.body.matchId : undefined,
+        matchId,
         props: typeof req.body?.props === 'object' ? req.body.props : undefined,
       });
       res.json({ ok: true });

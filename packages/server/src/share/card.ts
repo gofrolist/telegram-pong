@@ -42,11 +42,17 @@ function escapeXml(value: string): string {
     .replace(/'/g, '&apos;');
 }
 
-/** Names are rendered small and must not overflow the card. */
+/**
+ * Names are rendered small and must not overflow the card.
+ *
+ * Cut on code *points*, not UTF-16 code units: Telegram first names routinely
+ * contain emoji, and slicing one in half leaves a lone surrogate, which is not
+ * a legal XML character — resvg then renders tofu or rejects the SVG outright.
+ */
 function truncate(value: string, max = 14): string {
-  const trimmed = value.trim();
-  if (trimmed.length <= max) return trimmed;
-  return `${trimmed.slice(0, max - 1)}…`;
+  const points = [...value.trim()];
+  if (points.length <= max) return points.join('');
+  return `${points.slice(0, max - 1).join('')}…`;
 }
 
 /**
@@ -56,22 +62,36 @@ function truncate(value: string, max = 14): string {
  * A failed or slow fetch falls back to an initials disc rather than delaying
  * the card: the share tap is an interactive moment.
  */
+const MAX_AVATAR_BYTES = 2_000_000;
+
 async function fetchAvatar(url: string | null | undefined): Promise<string | null> {
   if (!url) return null;
   try {
     const controller = new AbortController();
+    // The timeout has to survive until the *body* is read. Clearing it once
+    // the headers land leaves a server that returns 200 and then trickles
+    // bytes able to hold this promise — and the share request awaiting it —
+    // open indefinitely.
     const timeout = setTimeout(() => controller.abort(), 2500);
-    const response = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (!response.ok) return null;
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) return null;
 
-    const type = response.headers.get('content-type') ?? 'image/jpeg';
-    if (!type.startsWith('image/')) return null;
+      const type = response.headers.get('content-type') ?? 'image/jpeg';
+      if (!type.startsWith('image/')) return null;
 
-    const buffer = Buffer.from(await response.arrayBuffer());
-    // A Telegram avatar is tens of kilobytes; anything far larger is not one.
-    if (buffer.byteLength > 2_000_000) return null;
-    return `data:${type};base64,${buffer.toString('base64')}`;
+      // A Telegram avatar is tens of kilobytes; anything far larger is not
+      // one. Checked from the header first so an oversized body is never
+      // buffered into memory at all.
+      const declared = Number(response.headers.get('content-length'));
+      if (Number.isFinite(declared) && declared > MAX_AVATAR_BYTES) return null;
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (buffer.byteLength > MAX_AVATAR_BYTES) return null;
+      return `data:${type};base64,${buffer.toString('base64')}`;
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch {
     return null;
   }

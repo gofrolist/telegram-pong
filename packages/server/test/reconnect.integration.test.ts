@@ -253,3 +253,66 @@ describe('result card', () => {
     expect(png.byteLength).toBeGreaterThan(5000);
   }, 30_000);
 });
+
+describe('asynchronous invites', () => {
+  /**
+   * The empty-room problem, which is the single biggest silent killer of an
+   * invite-only game.
+   *
+   * With no AI opponent an invite is often tapped an hour later, by which time
+   * the inviter has closed the app. The room outliving them is only half the
+   * answer — the other half is telling them somebody showed up. The
+   * notification used to fire from `beginMatch`, which needs BOTH players
+   * connected, so it announced the opponent only in the one case where the
+   * host could already see them arrive on screen, and stayed silent in the
+   * case it exists for.
+   */
+  it('keeps the room open and alive after the host leaves, and seats a later guest', async () => {
+    const tokenA = await authenticate(8001, 'Ada');
+    const tokenB = await authenticate(8002, 'Grace');
+    const roomId = await openRoom(tokenA);
+
+    const clientA = new sdk.Client(BASE);
+    clientA.auth.token = tokenA;
+    const roomA = await clientA.joinById(roomId, { token: tokenA }, stateModule.PongState);
+    await waitFor('host seated', () => roomA.state.players.size === 1);
+
+    // The host closes the app while nobody has taken the invite yet.
+    await roomA.leave(true);
+    await sleep(1500);
+
+    // An hour later (a second and a half here) somebody taps the link. The
+    // room must still be joinable — not ENDED by the host's departure.
+    const clientB = new sdk.Client(BASE);
+    clientB.auth.token = tokenB;
+    const roomB = await clientB.joinById(roomId, { token: tokenB }, stateModule.PongState);
+
+    await waitFor('guest seated', () => roomB.state.players.size >= 1);
+
+    // Still waiting, because a match needs two people — but crucially the room
+    // is alive and the guest is in it, not bounced off a dead room.
+    expect(roomB.state.meta.phase).toBe(gameCore.Phase.WAITING);
+    expect(roomB.state.meta.endReason).toBe(gameCore.EndReason.NONE);
+
+    // The guest took the open slot, so they are the top side; the bottom seat
+    // stays reserved for the host who created the room.
+    const me = roomB.state.players.get(roomB.sessionId);
+    expect(me).toBeDefined();
+    expect(me!.side).toBe(gameCore.SIDE_TOP);
+
+    // And when the host comes back, the match starts.
+    const clientA2 = new sdk.Client(BASE);
+    clientA2.auth.token = tokenA;
+    const roomA2 = await clientA2.joinById(roomId, { token: tokenA }, stateModule.PongState);
+
+    await waitFor(
+      'match starts once both are present',
+      () => roomA2.state.meta.phase !== gameCore.Phase.WAITING,
+      20_000,
+    );
+    expect(roomA2.state.players.get(roomA2.sessionId)!.side).toBe(gameCore.SIDE_BOTTOM);
+
+    await roomA2.leave(true);
+    await roomB.leave(true);
+  }, 90_000);
+});

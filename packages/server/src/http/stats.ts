@@ -43,16 +43,22 @@ export async function getHeadToHead(
     )
     .limit(1);
 
-  const [opponent] = await db
-    .select({
-      id: users.id,
-      name: users.firstName,
-      username: users.username,
-      photoUrl: users.photoUrl,
-    })
-    .from(users)
-    .where(eq(users.id, opponentId))
-    .limit(1);
+  // Only look the opponent up once a shared record proves the two have
+  // actually played. Fetching unconditionally turns this endpoint — whose only
+  // input validation is `Number.isSafeInteger` — into a directory that returns
+  // the name, username and photo of any user who has ever opened the app.
+  const [opponent] = record
+    ? await db
+        .select({
+          id: users.id,
+          name: users.firstName,
+          username: users.username,
+          photoUrl: users.photoUrl,
+        })
+        .from(users)
+        .where(eq(users.id, opponentId))
+        .limit(1)
+    : [];
 
   const userIsLow = userId === low;
   return {

@@ -14,10 +14,20 @@ import { t } from '../i18n/strings.js';
 
 export const bot = new Bot(config.TELEGRAM_BOT_TOKEN);
 
-/** The Mini App's canonical entry point. */
+/**
+ * The Mini App's canonical entry point.
+ *
+ * `ctx.match` for `/start` is whatever the user typed after the command, not a
+ * deep-link payload, so it has to be treated as free text. An unencoded space
+ * (`/start hello world`) makes the Bot API reject the whole inline keyboard
+ * with `BUTTON_URL_INVALID`, and the user gets no reply at all to the single
+ * most important message the bot handles.
+ */
 function miniAppUrl(startParam?: string): string {
   const base = `https://t.me/${config.TELEGRAM_BOT_USERNAME}/${config.TELEGRAM_APP_NAME}`;
-  return startParam ? `${base}?startapp=${startParam}` : base;
+  const trimmed = startParam?.trim();
+  if (!trimmed) return base;
+  return `${base}?startapp=${encodeURIComponent(trimmed)}`;
 }
 
 bot.command('start', async (ctx: Context) => {

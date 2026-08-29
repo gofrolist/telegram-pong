@@ -281,3 +281,58 @@ describe('prediction under 150ms RTT', () => {
     await roomB.leave(true);
   }, 120_000);
 });
+
+describe('side assignment', () => {
+  /**
+   * Regression: both clients used to conclude they were the bottom player.
+   *
+   * `joinById` resolves when the seat is confirmed, which is strictly before
+   * the first state patch — so `state.players` is still empty at that instant.
+   * Reading our own `PlayerInfo` there returned `undefined`, the code fell back
+   * to `SIDE_BOTTOM`, and the top player got an unmirrored field, an inverted
+   * pointer mapping, swapped scores, a wrong win flag, and prediction driving
+   * the opponent's paddle. Everything still *ran*, which is why no other test
+   * caught it.
+   */
+  it('gives the two players opposite ends, and not before the state decodes', async () => {
+    const tokenA = await authenticate(6001, 'Ada');
+    const tokenB = await authenticate(6002, 'Grace');
+    const roomId = await openRoom(tokenA);
+
+    const clientA = new Client(BASE);
+    const clientB = new Client(BASE);
+    clientA.auth.token = tokenA;
+    clientB.auth.token = tokenB;
+
+    const roomA = await clientA.joinById(roomId, { token: tokenA }, PongState);
+    // The precondition that made the bug possible. If a future SDK resolves
+    // `joinById` only after the first patch, this assertion is the thing that
+    // tells us the workaround is no longer load-bearing.
+    expect(roomA.state.players.get(roomA.sessionId)).toBeUndefined();
+
+    const roomB = await clientB.joinById(roomId, { token: tokenB }, PongState);
+
+    await waitFor(
+      'both PlayerInfos decoded on both clients',
+      () =>
+        roomA.state.players.get(roomA.sessionId) !== undefined &&
+        roomB.state.players.get(roomB.sessionId) !== undefined,
+    );
+
+    const sideA = roomA.state.players.get(roomA.sessionId)!.side;
+    const sideB = roomB.state.players.get(roomB.sessionId)!.side;
+
+    expect(new Set([sideA, sideB])).toEqual(new Set([SIDE_BOTTOM, SIDE_TOP]));
+    // The host opened the room, so the host defends the bottom — the near edge
+    // on their own screen before any mirroring is applied.
+    expect(sideA).toBe(SIDE_BOTTOM);
+    expect(sideB).toBe(SIDE_TOP);
+
+    // And each client agrees with the other about who is where.
+    expect(roomB.state.players.get(roomA.sessionId)!.side).toBe(sideA);
+    expect(roomA.state.players.get(roomB.sessionId)!.side).toBe(sideB);
+
+    await roomA.leave(true);
+    await roomB.leave(true);
+  }, 60_000);
+});

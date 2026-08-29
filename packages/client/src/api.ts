@@ -40,8 +40,13 @@ export interface CreatedRoom {
   roomCode: string;
   colyseusRoomId: string;
   origin: string;
-  startParam: string;
-  inviteUrl: string;
+  /**
+   * `null` when the server could not record the room: it is still joinable by
+   * `colyseusRoomId`, but its code resolves to nothing, so there is no link
+   * worth showing the host.
+   */
+  startParam: string | null;
+  inviteUrl: string | null;
 }
 
 export interface ResolvedRoom {

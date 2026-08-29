@@ -276,6 +276,14 @@ installs; without `fontconfig` and a font the card's text renders blank.
 
 ## Known gaps
 
+- **`initData` is not single-use.** It is accepted at exactly one endpoint and
+  exchanged for a short-lived token, but nothing stops the *same* `initData`
+  being presented again inside its 15-minute window to mint another token.
+  Closing this needs a persisted nonce set (a table, or Redis — which the brief
+  rules out at this size), i.e. a schema change. The short `auth_date` window
+  bounds the exposure to 15 minutes against Telegram's 24-hour default; it does
+  not eliminate it.
+
 - **`chat_instance` is unverified.** Stage 1 needs two Telegram accounts, two
   group chats, and a deployed page; it cannot be run from here. The probe is
   built (`?debug=initdata`) and the matrix is written. Chat leaderboards ship

@@ -124,6 +124,8 @@ export class PongRoom extends Room<PongRoomType> {
   private startedAt = 0;
   private longestRally = 0;
   private matchWritten = false;
+  /** Set the first time a non-host takes the open slot. */
+  private guestArrived = false;
   private disposeTimer: NodeJS.Timeout | null = null;
   private trace!: TraceRecorder;
 
@@ -230,9 +232,40 @@ export class PongRoom extends Room<PongRoomType> {
     info.connected = true;
     this.state.players.set(client.sessionId, info);
 
-    if (this.state.players.size === 2 && this.state.meta.phase === Phase.WAITING) {
-      await this.beginMatch(auth.userId);
+    // The guest taking the open slot is what "someone joined" means — it does
+    // NOT require the host to still be connected, and the host being away is
+    // precisely the case this notification exists for. With no AI opponent an
+    // invite is often tapped an hour later, by which point the inviter has
+    // closed the app and would otherwise never learn anyone showed up.
+    if (auth.userId !== this.options.hostUserId && !this.guestArrived) {
+      this.guestArrived = true;
+      void recordEvent({
+        name: 'opponent_joined',
+        userId: auth.userId,
+        chatInstance: this.options.chatInstance,
+        game: 'pong',
+        roomId: this.state.roomCode,
+      });
+      // Both touch the network and the database, so they run off the tick.
+      void markRoomFilled(this.state.roomCode, auth.userId);
+      if (!this.isHostConnected()) {
+        void notifyOpponentWaiting(this.options.hostUserId, this.state.roomCode, auth.userId);
+      }
     }
+
+    if (this.state.players.size === 2 && this.state.meta.phase === Phase.WAITING) {
+      this.beginMatch();
+    }
+  }
+
+  /** Is the room's host currently in the room? */
+  private isHostConnected(): boolean {
+    const hostSide = this.sideByUser.get(this.options.hostUserId);
+    if (hostSide === undefined) return false;
+    for (const [, info] of this.state.players) {
+      if (info.userId === String(this.options.hostUserId) && info.connected) return true;
+    }
+    return false;
   }
 
   /**
@@ -254,6 +287,13 @@ export class PongRoom extends Room<PongRoomType> {
       this.state.meta.phase = Phase.PAUSED;
     }
 
+    // Is there a match to lose? A host who opens a room and closes the app
+    // while waiting for someone to tap the invite has not forfeited anything —
+    // and ending the "match" here would put the room in `ENDED` for good, so
+    // the invite tapped an hour later (the case this room exists to serve)
+    // would land in a dead room that never starts.
+    const matchLive = this.matchStarted();
+
     void recordEvent({
       name: 'disconnect',
       userId: Number(info?.userId ?? 0) || undefined,
@@ -262,7 +302,7 @@ export class PongRoom extends Room<PongRoomType> {
       props: { phase: this.state.meta.phase },
     });
 
-    this.startReconnectCountdown();
+    if (matchLive) this.startReconnectCountdown();
 
     try {
       await this.allowReconnection(client, RECONNECT_GRACE_SEC);
@@ -270,12 +310,23 @@ export class PongRoom extends Room<PongRoomType> {
     } catch {
       // The grace period elapsed. The player who stayed takes the match.
       this.stopReconnectCountdown();
-      if (info) {
+      if (info && matchLive) {
         const side = this.sideBySession.get(client.sessionId);
-        const winnerSide: Side | null = side === undefined ? null : side === SIDE_BOTTOM ? SIDE_TOP : SIDE_BOTTOM;
+        const winnerSide: Side | null =
+          side === undefined ? null : side === SIDE_BOTTOM ? SIDE_TOP : SIDE_BOTTOM;
         await this.endMatch(EndReason.DISCONNECT, winnerSide);
       }
     }
+  }
+
+  /**
+   * Has a match actually begun in this room?
+   *
+   * `startedAt` is stamped by {@link beginMatch} and by nothing else, so this
+   * is false for a room that is still waiting on its second player.
+   */
+  private matchStarted(): boolean {
+    return this.startedAt !== 0 && this.state.meta.phase !== Phase.ENDED;
   }
 
   onReconnect(client: Client): void {
@@ -309,7 +360,10 @@ export class PongRoom extends Room<PongRoomType> {
     const info = this.state.players.get(client.sessionId);
     this.state.players.delete(client.sessionId);
 
-    if (consented && info && !this.matchWritten && this.state.meta.phase !== Phase.ENDED) {
+    // Only a live match can be forfeited. A host who backs out of the room
+    // they just opened, before anyone has taken the invite, leaves an open
+    // room behind — not an `ENDED` one that every later invitee bounces off.
+    if (consented && info && !this.matchWritten && this.matchStarted()) {
       const side = this.sideBySession.get(client.sessionId);
       const winnerSide: Side | null =
         side === undefined ? null : side === SIDE_BOTTOM ? SIDE_TOP : SIDE_BOTTOM;
@@ -388,11 +442,24 @@ export class PongRoom extends Room<PongRoomType> {
   private assignSide(userId: number): Side {
     const existing = this.sideByUser.get(userId);
     if (existing !== undefined) return existing;
-    // The host always defends the bottom, which is the near edge on their own
-    // phone. Both players see themselves at the bottom; the client mirrors.
-    const side: Side = userId === this.options.hostUserId ? SIDE_BOTTOM : SIDE_TOP;
-    this.sideByUser.set(userId, side);
-    return side;
+
+    // The host prefers the bottom, which is the near edge on their own phone.
+    // Both players see themselves at the bottom; the client mirrors.
+    const preferred: Side = userId === this.options.hostUserId ? SIDE_BOTTOM : SIDE_TOP;
+    const other: Side = preferred === SIDE_BOTTOM ? SIDE_TOP : SIDE_BOTTOM;
+
+    // The preference is not a guarantee: nothing reserves the host's seat, so
+    // if the host never connects, two guests tapping the same invite would
+    // both be handed the top paddle — the bottom one would then never move,
+    // the room would have no bottom player to write a result for, and the
+    // match would silently evaporate. Take whichever end is actually free.
+    for (const candidate of [preferred, other]) {
+      if (this.userIdForSide(candidate) === null) {
+        this.sideByUser.set(userId, candidate);
+        return candidate;
+      }
+    }
+    throw new Error('room_full');
   }
 
   private everyoneConnected(): boolean {
@@ -402,7 +469,7 @@ export class PongRoom extends Room<PongRoomType> {
     return this.state.players.size === 2;
   }
 
-  private async beginMatch(guestUserId: number): Promise<void> {
+  private beginMatch(): void {
     this.startedAt = Date.now();
     startMatch(this.world(), this.seed, SIDE_BOTTOM);
     this.trace.reset();
@@ -415,26 +482,12 @@ export class PongRoom extends Room<PongRoomType> {
     this.autoDispose = true;
 
     void recordEvent({
-      name: 'opponent_joined',
-      userId: guestUserId,
-      chatInstance: this.options.chatInstance,
-      game: 'pong',
-      roomId: this.state.roomCode,
-    });
-    void recordEvent({
       name: 'match_started',
       userId: this.options.hostUserId,
       chatInstance: this.options.chatInstance,
       game: 'pong',
       roomId: this.state.roomCode,
     });
-
-    // Both of these touch the network and the database, so they run off the
-    // tick entirely.
-    void markRoomFilled(this.state.roomCode, guestUserId);
-    if (guestUserId !== this.options.hostUserId) {
-      void notifyOpponentWaiting(this.options.hostUserId, this.state.roomCode, guestUserId);
-    }
   }
 
   /**

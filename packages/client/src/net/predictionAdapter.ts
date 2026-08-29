@@ -179,18 +179,34 @@ export async function attachPrediction(room: PongRoom, mySide: Side): Promise<Pr
  */
 function waitForDecodedState(room: PongRoom): Promise<void> {
   if (isDecoded(room)) return Promise.resolve();
-  return new Promise<void>((resolve) => {
+  return new Promise<void>((resolve, reject) => {
     // Poll rather than relying on a single `onStateChange`: the sub-schemas
     // may be decoded across more than one patch, so the first change is not a
     // guarantee that all four refs have landed.
+    //
+    // Bounded, because a room that errors or is left before its first patch
+    // would otherwise leave this interval running at 16ms for the life of the
+    // page — one leaked timer per mount, and the caller's promise never
+    // settles so its `.catch` never runs either.
+    const deadline = Date.now() + DECODE_TIMEOUT_MS;
     const timer = setInterval(() => {
       if (isDecoded(room)) {
         clearInterval(timer);
         resolve();
+      } else if (Date.now() > deadline) {
+        clearInterval(timer);
+        reject(new Error('state_never_decoded'));
       }
     }, 16);
   });
 }
+
+/**
+ * How long to wait for the first full state patch before giving up.
+ *
+ * Generous: this covers a cold join on a bad mobile link, not a fast path.
+ */
+const DECODE_TIMEOUT_MS = 15_000;
 
 function isDecoded(room: PongRoom): boolean {
   const state = room.state as unknown as Partial<WorldRefs> | undefined;

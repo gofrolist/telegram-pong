@@ -45,9 +45,13 @@ services:
       PUBLIC_CLIENT_URL: ${PUBLIC_CLIENT_URL:-https://localhost:5173}
       SESSION_SECRET: ${SESSION_SECRET}
       CHAT_LEADERBOARDS_ENABLED: ${CHAT_LEADERBOARDS_ENABLED:-false}
+      # Defaults OFF here, unlike in production. `setWebhook` is global per bot
+      # token, so a laptop that registers itself silently steals every update
+      # from the deployed bot until someone re-registers it.
+      TELEGRAM_REGISTER_WEBHOOK: ${TELEGRAM_REGISTER_WEBHOOK:-false}
       # Set to 75 to develop against a 150ms round trip — see the netcode
       # section of the README.
-      COLYSEUS_LATENCY: ${COLYSEUS_LATENCY:-}
+      SIMULATED_LATENCY_MS: ${SIMULATED_LATENCY_MS:-}
 
 volumes:
   pong-pgdata:

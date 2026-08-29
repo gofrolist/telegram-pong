@@ -9,6 +9,19 @@
 
 import { z } from 'zod';
 
+/**
+ * Parse an environment flag.
+ *
+ * Opt-out by an explicit falsey word, case-insensitively. A `!== 'false'` test
+ * treats `False`, `FALSE`, `no`, `off` and `''` as **true**, which for
+ * `TELEGRAM_REGISTER_WEBHOOK` means a laptop quietly stealing the production
+ * bot's updates because someone capitalised the value.
+ */
+function parseBoolean(value: string): boolean {
+  const normalised = value.trim().toLowerCase();
+  return !['false', '0', 'no', 'off', ''].includes(normalised);
+}
+
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(2567),
@@ -36,10 +49,7 @@ const schema = z.object({
    * token, so a laptop that registers itself silently steals every update
    * from the real deployment until someone notices.
    */
-  TELEGRAM_REGISTER_WEBHOOK: z
-    .string()
-    .default('true')
-    .transform((value) => value !== 'false' && value !== '0'),
+  TELEGRAM_REGISTER_WEBHOOK: z.string().default('true').transform(parseBoolean),
   /** Public origin of the Mini App on Vercel. Used for CORS and links. */
   PUBLIC_CLIENT_URL: z.string().url(),
 
@@ -67,10 +77,7 @@ const schema = z.object({
    * which must be verified against two real accounts in two real chats before
    * it is trusted. See `docs/CHAT-INSTANCE-VERIFICATION.md`.
    */
-  CHAT_LEADERBOARDS_ENABLED: z
-    .string()
-    .default('true')
-    .transform((value) => value !== 'false' && value !== '0'),
+  CHAT_LEADERBOARDS_ENABLED: z.string().default('true').transform(parseBoolean),
 
   /** Rooms a single user may create per hour. */
   ROOM_CREATE_LIMIT_PER_HOUR: z.coerce.number().int().positive().default(30),

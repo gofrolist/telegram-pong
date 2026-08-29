@@ -95,7 +95,17 @@ export interface PreparedShare {
  * retry, not an error screen.
  */
 export async function prepareShare(input: PrepareShareInput): Promise<PreparedShare | null> {
-  const fileId = await ensureCardFileId(input.matchId, input.userId, input.card);
+  // `ensureCardFileId` does an unwrapped `db.select` and renders an SVG, both
+  // of which can reject. Outside a `try` they escape this function, breaking
+  // the contract above: the caller's catch-all turns a retryable 502 into a
+  // generic 500 and the `share_message_failed` funnel event never fires.
+  let fileId: string | null;
+  try {
+    fileId = await ensureCardFileId(input.matchId, input.userId, input.card);
+  } catch (error) {
+    console.error('[share] card render failed:', error);
+    return null;
+  }
   if (!fileId) return null;
 
   const strings = t(input.languageCode);

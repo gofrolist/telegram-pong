@@ -5,8 +5,15 @@
  * valid for as long as its `auth_date` allows — Telegram's own default is a
  * day. Anything that captures it once (a shared screenshot of a debug page, a
  * proxy on a hostile network) can replay it for that whole window. So it is
- * accepted exactly once, at the front door, and immediately exchanged for our
- * own token measured in minutes.
+ * accepted at one front door only — `POST /api/auth` — and immediately
+ * exchanged for our own token measured in minutes.
+ *
+ * NOT single-use. The same `initData` can be presented again inside its
+ * `INIT_DATA_MAX_AGE_SEC` window and will mint another session token; making
+ * it single-use needs a persisted nonce set, which is a schema change rather
+ * than a code change. What the short window buys is a bound on that exposure:
+ * 15 minutes to replay, against Telegram's own 24-hour default. See
+ * `docs/ASSUMPTIONS.md` under "Known gaps".
  *
  * Everything downstream — the room's `onAuth`, every HTTP route — trusts only
  * our token. `initData` never travels past this module.

@@ -23,16 +23,14 @@ export function Home({ language, profile, chatLeaderboard, onRoomOpened }: Props
   const { t } = useTranslation();
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [invite, setInvite] = useState<api.CreatedRoom | null>(null);
-  const [copied, setCopied] = useState(false);
-
   const startMatch = useCallback(async () => {
     setCreating(true);
     setError(null);
     try {
-      const room = await api.createRoom();
-      setInvite(room);
-      onRoomOpened(room);
+      // The host goes straight into their own room; the invite link travels
+      // with them and is rendered on the waiting screen. Keeping a copy of it
+      // here would be dead state — this component unmounts in the same batch.
+      onRoomOpened(await api.createRoom());
     } catch (caught) {
       setError(
         caught instanceof api.ApiError && caught.code === 'too_many_rooms'
@@ -44,20 +42,6 @@ export function Home({ language, profile, chatLeaderboard, onRoomOpened }: Props
     }
   }, [onRoomOpened, t]);
 
-  const copyLink = useCallback(async () => {
-    if (!invite) return;
-    try {
-      await navigator.clipboard.writeText(invite.inviteUrl);
-      setCopied(true);
-      api.reportEvent('invite_shared', { props: { method: 'copy' } });
-      window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard permission can be denied inside the webview; the link is
-      // visible on screen either way.
-      setError(t('app.error'));
-    }
-  }, [invite, t]);
-
   return (
     <div className="screen">
       <header className="screen__header">
@@ -65,19 +49,9 @@ export function Home({ language, profile, chatLeaderboard, onRoomOpened }: Props
         <p className="screen__tagline">{t('home.tagline')}</p>
       </header>
 
-      {!invite ? (
-        <button type="button" className="button button--primary" onClick={startMatch} disabled={creating}>
-          {creating ? t('home.creating') : t('home.play')}
-        </button>
-      ) : (
-        <section className="card">
-          <p className="card__text">{t('home.inviteReady')}</p>
-          <code className="card__link">{invite.inviteUrl}</code>
-          <button type="button" className="button button--primary" onClick={copyLink}>
-            {copied ? t('home.copied') : t('home.copyLink')}
-          </button>
-        </section>
-      )}
+      <button type="button" className="button button--primary" onClick={() => void startMatch()} disabled={creating}>
+        {creating ? t('home.creating') : t('home.play')}
+      </button>
 
       {error && <p className="error">{error}</p>}
 

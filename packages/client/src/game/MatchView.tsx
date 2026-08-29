@@ -17,6 +17,7 @@ import { useTranslation } from 'react-i18next';
 import { Phase, SIDE_BOTTOM, SIDE_TOP, type Side } from '@pong/game-core';
 import type { PongState } from '@pong/game-core/net';
 
+import * as api from '../api.js';
 import { attachPrediction, type PredictionHandle } from '../net/predictionAdapter.js';
 import type { PongRoomHandle } from '../net/client.js';
 import { draw, pointerToFieldX, resizeCanvas, type Theme, type Viewport } from './renderer.js';
@@ -34,6 +35,12 @@ export interface MatchOutcome {
 interface Props {
   room: PongRoomHandle;
   mySide: Side;
+  /**
+   * Set only for the host who just opened this room. The waiting screen is the
+   * one place they can still reach the link they have to share, so it has to
+   * travel with them rather than staying behind on the home screen.
+   */
+  inviteUrl?: string | null;
   onFinished(outcome: MatchOutcome): void;
   onLeave(): void;
 }
@@ -57,7 +64,7 @@ function readTheme(): Theme {
   };
 }
 
-export function MatchView({ room, mySide, onFinished, onLeave }: Props) {
+export function MatchView({ room, mySide, inviteUrl, onFinished, onLeave }: Props) {
   const { t } = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   /**
@@ -70,6 +77,7 @@ export function MatchView({ room, mySide, onFinished, onLeave }: Props) {
   const [reconnectSeconds, setReconnectSeconds] = useState(0);
   const [opponentConnected, setOpponentConnected] = useState(true);
   const [selfConnected, setSelfConnected] = useState(true);
+  const [inviteCopied, setInviteCopied] = useState(false);
 
   const mirrored = mySide === SIDE_TOP;
 
@@ -103,13 +111,20 @@ export function MatchView({ room, mySide, onFinished, onLeave }: Props) {
     // Attaching waits for the first decoded state patch, so the render loop
     // starts before prediction is live and simply draws the replicated
     // position until it is.
-    void attachPrediction(room, mySide).then((handle) => {
-      if (!running) {
-        handle.dispose();
-        return;
-      }
-      prediction = handle;
-    });
+    attachPrediction(room, mySide)
+      .then((handle) => {
+        if (!running) {
+          handle.dispose();
+          return;
+        }
+        prediction = handle;
+      })
+      .catch((error: unknown) => {
+        // Prediction is an enhancement, not a prerequisite: the loop below
+        // falls back to drawing the replicated state. Swallowing this
+        // silently would leave an unhandled rejection instead.
+        console.warn('[match] prediction unavailable, falling back to replicated state', error);
+      });
 
     const loop = () => {
       if (!running) return;
@@ -229,6 +244,19 @@ export function MatchView({ room, mySide, onFinished, onLeave }: Props) {
     [mirrored],
   );
 
+  const copyInvite = useCallback(async () => {
+    if (!inviteUrl) return;
+    try {
+      await navigator.clipboard.writeText(inviteUrl);
+      setInviteCopied(true);
+      api.reportEvent('invite_shared', { props: { method: 'copy' } });
+      window.setTimeout(() => setInviteCopied(false), 2000);
+    } catch {
+      // Clipboard permission can be denied inside the webview; the link is
+      // rendered on screen either way.
+    }
+  }, [inviteUrl]);
+
   const paused = phase === Phase.PAUSED;
 
   return (
@@ -267,6 +295,14 @@ export function MatchView({ room, mySide, onFinished, onLeave }: Props) {
         <div className="match__overlay" role="status">
           <div className="match__overlay-title">{t('home.waitingForOpponent')}</div>
           <div className="match__overlay-text">{t('home.waitingHint')}</div>
+          {inviteUrl && (
+            <>
+              <code className="card__link">{inviteUrl}</code>
+              <button type="button" className="button button--primary" onClick={() => void copyInvite()}>
+                {inviteCopied ? t('home.copied') : t('home.copyLink')}
+              </button>
+            </>
+          )}
         </div>
       )}
 
