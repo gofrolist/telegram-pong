@@ -1,9 +1,10 @@
 /**
  * HTTP client for our own backend.
  *
- * Vercel and fly are different origins, so every one of these is a
- * cross-origin request that the browser will preflight; the server's CORS
- * allowlist is the matching half.
+ * In production the bundle is served BY that backend, so every call here is
+ * same-origin: no preflight, and no origin to configure. `VITE_SERVER_URL`
+ * overrides it for the case that is not — `bun run dev:client`, where Vite
+ * serves the app on :5173 and the server is somewhere else.
  *
  * The session token is held in memory only. Persisting it would outlive the
  * `initData` it was minted from, and the whole point of a short-lived token is
@@ -12,7 +13,9 @@
 
 import type { InvitePayload } from '@pong/game-core';
 
-const BASE = import.meta.env.VITE_SERVER_URL ?? 'https://localhost:2567';
+const BASE =
+  import.meta.env.VITE_SERVER_URL ??
+  (import.meta.env.DEV ? 'https://localhost:2567' : window.location.origin);
 
 export interface AuthUser {
   id: number;

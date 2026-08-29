@@ -50,8 +50,16 @@ const schema = z.object({
    * from the real deployment until someone notices.
    */
   TELEGRAM_REGISTER_WEBHOOK: z.string().default('true').transform(parseBoolean),
-  /** Public origin of the Mini App on Vercel. Used for CORS and links. */
-  PUBLIC_CLIENT_URL: z.string().url(),
+  /**
+   * Public origin of the Mini App.
+   *
+   * Optional, and normally unset: the Mini App is served by THIS server, from
+   * the same origin, so the default below is the correct answer. It stays
+   * overridable for the one case where it is not — a client running on Vite's
+   * dev server, or a future move back to separate hosting — because that case
+   * is exactly when the CORS allowlist has to know a second origin.
+   */
+  PUBLIC_CLIENT_URL: z.string().url().optional(),
 
   /** Neon pooled (pgbouncer) connection string. */
   DATABASE_URL: z.string().min(1),
@@ -87,7 +95,13 @@ const schema = z.object({
    * this is how Stage 5 is tested without a real bad network.
    */
   SIMULATED_LATENCY_MS: z.coerce.number().int().nonnegative().default(0),
-});
+}).transform((env) => ({
+  ...env,
+  // Same origin unless told otherwise. Resolved here rather than at each use
+  // site so that `config.PUBLIC_CLIENT_URL` is a `string` everywhere, and so
+  // there is one place that decides what "the client's origin" means.
+  PUBLIC_CLIENT_URL: env.PUBLIC_CLIENT_URL ?? env.PUBLIC_SERVER_URL,
+}));
 
 export type Config = z.infer<typeof schema>;
 

@@ -34,25 +34,30 @@ COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 WORKDIR /app
 
 # Manifests first, so a source-only change does not re-resolve the lockfile.
-# ALL THREE workspace manifests are copied even though the Mini App is not part
-# of this image: `--frozen-lockfile` compares workspace membership against the
-# lockfile, and a missing member reads as "the lockfile changed". `--filter`
-# then scopes what is actually installed — the client's own dependencies
-# (React, Vite) never enter the image.
+# Every workspace is installed here, unfiltered: this stage builds the Mini App
+# too, so React and Vite are genuinely needed. They do not reach the runtime
+# image — stage 2 installs production server dependencies from scratch, and
+# stage 3 copies only from stage 2.
 COPY package.json bun.lock ./
 COPY packages/game-core/package.json packages/game-core/
 COPY packages/server/package.json packages/server/
 COPY packages/client/package.json packages/client/
 
-RUN bun install --frozen-lockfile --filter '@pong/server'
+RUN bun install --frozen-lockfile
 
 COPY packages/game-core packages/game-core
 COPY packages/server packages/server
+COPY packages/client packages/client
 
 # game-core must be built first: its `exports` resolve to compiled JS outside
-# development, and the runtime stage runs plain `node`, which cannot load .ts.
+# development, and both of the other two resolve it that way here.
+#
+# The client is built with no `VITE_SERVER_URL`, which is what makes it call
+# its own origin — it is served by the server it talks to, so there is no
+# hostname to bake in and nothing to re-build when one changes.
 RUN bun run --filter @pong/game-core build \
- && bun run --filter @pong/server build
+ && bun run --filter @pong/server build \
+ && bun run --filter @pong/client build
 
 # ---------------------------------------------------------------------------
 # Stage 2 — production dependencies only.
@@ -136,6 +141,12 @@ COPY --from=build --chown=pong:pong /app/packages/game-core/dist ./packages/game
 COPY --from=build --chown=pong:pong /app/packages/server/package.json ./packages/server/
 COPY --from=build --chown=pong:pong /app/packages/server/build ./packages/server/build
 COPY --from=build --chown=pong:pong /app/packages/server/drizzle ./packages/server/drizzle
+
+# The Mini App, served by the server from the same origin as the API and the
+# socket. `public/` is inside the server package on purpose: the code resolves
+# it relative to its own module URL, so the path holds whether the server is
+# running from `src/` under tsx or from `build/` here.
+COPY --from=build --chown=pong:pong /app/packages/client/dist ./packages/server/public
 
 USER pong
 WORKDIR /app/packages/server

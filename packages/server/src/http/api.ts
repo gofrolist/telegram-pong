@@ -5,13 +5,17 @@
  * `initData` exchange, room creation and invite resolution, stats reads, and
  * share preparation.
  *
- * CORS is explicit and narrow. Vercel and fly are different origins, so the
- * browser will preflight every one of these; a permissive `*` would also make
- * the session token readable by any page that can convince a user to visit it.
+ * CORS is explicit and narrow, and in production it is also mostly moot: the
+ * Mini App is served from this same origin (see `staticClient.ts`), so the
+ * browser sends no `Origin` on these calls at all. The allowlist earns its
+ * keep in development, where the client runs on Vite's dev server, and as the
+ * thing that stops a permissive `*` from making the session token readable by
+ * any page that can convince a user to visit it.
  */
 
 import type { Application, NextFunction, Request, Response } from 'express';
 import express from 'express';
+import { matchMaker } from 'colyseus';
 
 import { config, isDevelopment } from '../config.js';
 import { recordEvent } from '../analytics.js';
@@ -37,6 +41,7 @@ import { db } from '../db/client.js';
 import { users } from '../db/schema.js';
 import { eq, inArray } from 'drizzle-orm';
 import { webhookHandler } from '../telegram/bot.js';
+import { mountClient } from './staticClient.js';
 
 /** Requests carrying a verified session. */
 interface AuthedRequest extends Request {
@@ -53,6 +58,53 @@ const ALLOWED_ORIGINS = new Set(
   ].filter((value): value is string => Boolean(value)),
 );
 
+/**
+ * Narrow the CORS headers Colyseus applies to *every* response.
+ *
+ * This is not an `/api` concern and cannot be solved by middleware. Colyseus
+ * `prependListener`s its own handler onto the HTTP server, so its headers are
+ * written — and every `OPTIONS` is answered with 204 — before express runs at
+ * all. Its defaults are `Access-Control-Allow-Origin` reflected from whatever
+ * `Origin` the caller sent, plus `Access-Control-Allow-Credentials: true`,
+ * which makes every route on this host readable by any page on the internet
+ * and silently undoes the allowlist below.
+ *
+ * The same headers govern the `/matchmake` handshake, so this narrows them
+ * rather than removing them.
+ */
+function narrowTransportCors(): void {
+  matchMaker.controller.DEFAULT_CORS_HEADERS = {
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+    // Nothing here authenticates with a cookie: the session arrives as a
+    // bearer token the Mini App holds in memory.
+    'Access-Control-Allow-Credentials': 'false',
+    // The fallback for an origin that is not on the allowlist. It has to be
+    // *some* origin — the key is not optional — so it is one we already trust,
+    // which by construction can never be the caller's own.
+    'Access-Control-Allow-Origin': config.PUBLIC_CLIENT_URL,
+    'Access-Control-Max-Age': '600',
+  };
+
+  matchMaker.controller.getCorsHeaders = (headers: Headers): Record<string, string> => {
+    const origin = headers.get('origin');
+    // `Vary` unconditionally, including on the miss: the response genuinely
+    // differs by origin, and a cache that learned otherwise would hand one
+    // origin's allowance to another.
+    return origin && ALLOWED_ORIGINS.has(origin)
+      ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' }
+      : { Vary: 'Origin' };
+  };
+}
+
+/**
+ * The `/api` half of the same policy.
+ *
+ * `narrowTransportCors` has already written correct headers by the time this
+ * runs; this re-states them for the API routes specifically, so the policy
+ * survives a future change of transport. The `OPTIONS` branch is unreachable
+ * in production for the same reason — Colyseus answers preflights first.
+ */
 function cors(req: Request, res: Response, next: NextFunction): void {
   const origin = req.headers.origin;
   if (origin && ALLOWED_ORIGINS.has(origin)) {
@@ -117,6 +169,8 @@ function isUuid(value: string): boolean {
 }
 
 export function mountApi(app: Application): void {
+  narrowTransportCors();
+
   // The webhook is mounted BEFORE the JSON body parser scoped to /api, and
   // uses its own parser: grammY needs the parsed update, and Telegram will not
   // send an Origin header, so it must sit outside CORS as well.
@@ -526,4 +580,8 @@ export function mountApi(app: Application): void {
   );
 
   app.use('/api', api);
+
+  // LAST. The Mini App's fallback answers anything that is left, so every
+  // route above has to be registered before it.
+  mountClient(app);
 }

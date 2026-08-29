@@ -29,10 +29,10 @@ document. Do not build on the field until you have seen it behave.
 
 ## The probe
 
-Already built. Deploy the client and open:
+Already built. Deploy, then open:
 
 ```
-https://<your-app>.vercel.app/?debug=initdata
+https://<your-app>.fly.dev/?debug=initdata
 ```
 
 It renders `chat_instance`, `chat_type`, `start_param`, the platform, and what
