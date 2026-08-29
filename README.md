@@ -111,6 +111,23 @@ The client needs `VITE_SERVER_URL` pointing at the game server.
 
 ## Local development
 
+### Git hooks
+
+```sh
+brew install pre-commit   # or: pipx install pre-commit
+pre-commit install
+```
+
+Every commit then runs gitleaks, whitespace and JSON/YAML checks, actionlint
+over `.github/`, ruff over `tools/`, `tsc` across all three packages, the
+game-core suite, and a `--frozen-lockfile --dry-run` check that `bun.lock`
+still matches the manifests. The whole thing is a couple of seconds; the server
+and client suites are deliberately left to CI, where their ~35s is affordable.
+
+The same hooks run as the `pre-commit` job in CI (minus the three that are
+already jobs of their own), because a local hook is one `--no-verify` away from
+never having run — and a leaked bot token is not fixable by a later commit.
+
 ### HTTPS is mandatory
 
 Telegram will not open an `http://` Mini App, even on localhost. Two options:
