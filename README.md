@@ -205,6 +205,42 @@ and set `VITE_SERVER_URL` to the fly URL.
 assets. Telegram's webview caches aggressively enough that without this pairing
 a deploy can stay invisible for hours.
 
+### CI
+
+`.github/workflows/ci.yml` runs on every pull request and every push to `main`:
+typecheck, the three test suites (one runner per package — the integration
+tests assert against wall clock and go flaky when they share two cores), the
+full build, and a Docker build that boots the image and curls `/healthz`. The
+aggregate job is named `CI`; point branch protection at that one.
+
+### Shipping to fly
+
+Deploys are cut by publishing a GitHub Release — a push to `main` deploys
+nothing:
+
+```sh
+gh release create v0.1.1 --generate-notes
+```
+
+`.github/workflows/fly-deploy.yml` then refuses to run unless `CI` was green
+for that commit, builds the image, pushes it to fly's registry, runs
+`build/db/migrate.js` **from inside that exact image**, deploys it by content
+digest with `--ha=false`, and finally checks both that `/healthz` answers and
+that the log says the Telegram webhook was registered — the second one matters
+because a failed registration is deliberately non-fatal, so without the check a
+deaf bot deploys green.
+
+Two repository secrets are required:
+
+| secret | value |
+| --- | --- |
+| `FLY_API_TOKEN` | `fly tokens create deploy -a telegram-pong` |
+| `MIGRATION_DATABASE_URL` | Neon's **direct** connection string (not `-pooler`) |
+
+The gate is deliberate rather than fussy: the app is one machine holding every
+room in memory, so each deploy ends the live matches and drops the invites that
+have not been tapped yet.
+
 ---
 
 ## How it works

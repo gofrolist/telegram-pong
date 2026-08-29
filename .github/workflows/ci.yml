@@ -1,0 +1,202 @@
+name: CI
+# Runs on every PR and on every push to main. The push-to-main run is not
+# redundant here the way it is in a PR-only repo: this project is pushed to
+# directly, so without it most commits would never be checked at all.
+#
+# Shape: the checks fan out across jobs rather than running serially in one.
+# `ubuntu-latest` is a 2-core box, and the test suite is dominated by
+# integration tests that spawn a REAL server process — its own port, its own
+# uWebSockets event loop, its own 30 Hz tick — and then assert against wall
+# clock (a 3-second countdown, a 30-second reconnection window, a p95 on
+# prediction error). Sharing two cores between the server suite and the client
+# suite makes those assertions miss their deadlines for reasons that have
+# nothing to do with the code under test. One runner per package is not about
+# wall clock; it is what keeps the timing tests honest.
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+
+      # No build step first, deliberately. Both the server and the client set
+      # `customConditions: ["development"]`, so `@pong/game-core` resolves to
+      # its TypeScript SOURCE — a type error in the shared simulation surfaces
+      # in all three packages here, not just in game-core's own check.
+      - name: Typecheck all packages
+        run: bun run typecheck
+
+  test:
+    name: tests (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      # Report every package's failures in one run instead of cancelling the
+      # siblings on the first red — one push, the whole picture.
+      fail-fast: false
+      matrix:
+        package: [game-core, server, client]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+
+      # No database service. The integration tests point DATABASE_URL at a
+      # closed port on purpose: every write in the server is wrapped so that a
+      # database outage degrades stats rather than breaking a match, and the
+      # suite proves that claim. Standing up Postgres here would quietly
+      # retire the assertion.
+      - name: Run tests
+        run: bun run --filter @pong/${{ matrix.package }} test
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+
+      # game-core first, then server, then client — the order the root script
+      # already encodes. It matters: outside the `development` condition the
+      # other two resolve game-core to compiled JS, so a stale or missing
+      # `dist` is a build failure rather than a fallback to source.
+      #
+      # This is also the gate on the two EMITTING tsconfigs
+      # (tsconfig.build.json), which the `typecheck` job never touches: it runs
+      # `tsc --noEmit` against the wider `include` (src + test), while these
+      # decide what actually ships.
+      - name: Build every package
+        run: bun run build
+
+  docker:
+    name: docker build (smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # Builds the REAL Dockerfile fly deploys. The jobs above run bun and node
+      # on the runner HOST and never touch it, so a base-image bump, a change
+      # to the multi-stage `--filter` install, or a dependency whose prebuilt
+      # binary does not match the image's glibc all pass them green and break
+      # only in the deploy. That last one is not hypothetical: uWebSockets.js
+      # ships binaries linked against glibc 2.38, which is why the image is
+      # trixie and not bookworm — a mistake that builds, pushes, and then dies
+      # at startup.
+      - name: Build image (no push)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: pong:smoke
+          # GitHub Actions cache — scoped automatically per branch with a main
+          # fallback, and needs no registry login, so it works on fork PRs too.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Booting the image is the half of this check that catches the runtime
+      # failures a build cannot see: a missing .so, a native addon that will
+      # not load, an import-time API change. Config is parsed at import time
+      # and loudly, so these values must satisfy the zod schema (a >=20-char
+      # bot token, a >=32-char session secret) even though nothing here talks
+      # to Telegram or to a database.
+      #
+      # TELEGRAM_REGISTER_WEBHOOK=false is the one that matters: `true` would
+      # make the boot path call `setWebhook` and `bot.init()` against the Bot
+      # API with a fake token, so the smoke would fail on the fake credential
+      # instead of on the image. DATABASE_URL points at a closed port — the
+      # health check deliberately does not touch the database, because a cold
+      # Neon compute takes seconds to wake.
+      - name: Boot smoke (the image starts and serves /healthz)
+        run: |
+          set -euo pipefail
+          docker run -d --name pong-smoke -p 2567:2567 \
+            -e NODE_ENV=production \
+            -e PORT=2567 \
+            -e TELEGRAM_BOT_TOKEN='123456:CI-SMOKE-TOKEN-NOT-A-REAL-BOT' \
+            -e TELEGRAM_BOT_USERNAME='pong_ci_smoke_bot' \
+            -e TELEGRAM_APP_NAME='pong' \
+            -e TELEGRAM_WEBHOOK_SECRET='ci-smoke-webhook-secret-value' \
+            -e TELEGRAM_REGISTER_WEBHOOK=false \
+            -e PUBLIC_SERVER_URL='http://localhost:2567' \
+            -e PUBLIC_CLIENT_URL='http://localhost:5173' \
+            -e SESSION_SECRET='ci-smoke-session-secret-at-least-32-chars' \
+            -e DATABASE_URL='postgresql://nobody:nobody@127.0.0.1:1/nowhere' \
+            pong:smoke
+
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://localhost:2567/healthz; then
+              echo
+              echo "healthy after ${attempt}s"
+              docker rm -f pong-smoke >/dev/null
+              exit 0
+            fi
+            # A container that has already exited will never become healthy;
+            # fail now with its logs rather than after 30 pointless seconds.
+            if [ "$(docker inspect -f '{{.State.Running}}' pong-smoke)" != "true" ]; then
+              break
+            fi
+            sleep 1
+          done
+
+          echo "::error::The image did not serve /healthz within 30s."
+          docker logs pong-smoke || true
+          docker rm -f pong-smoke >/dev/null || true
+          exit 1
+
+  # Aggregate gate. Point branch protection (or a ruleset) at `CI` and it keeps
+  # covering the jobs above even as they are added and renamed. `always()` is
+  # what makes it meaningful: without it a failed upstream job would SKIP this
+  # one, and a skipped required check counts as passing.
+  ci:
+    name: CI
+    needs: [typecheck, test, build, docker]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify every check passed
+        run: |
+          echo "typecheck=${{ needs.typecheck.result }} test=${{ needs.test.result }} build=${{ needs.build.result }} docker=${{ needs.docker.result }}"
+          failed=0
+          for result in \
+            "${{ needs.typecheck.result }}" \
+            "${{ needs.test.result }}" \
+            "${{ needs.build.result }}" \
+            "${{ needs.docker.result }}"; do
+            [ "$result" = "success" ] || failed=1
+          done
+          if [ "$failed" = "1" ]; then
+            echo "::error::One or more CI checks did not succeed."
+            exit 1
+          fi
