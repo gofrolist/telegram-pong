@@ -299,11 +299,15 @@ installs; without `fontconfig` and a font the card's text renders blank.
   upload sink would avoid this and is the usual production fix.
 - **No load test.** One machine is claimed to hold hundreds of rooms; that
   number is from the brief, not measured here.
-- **Inline mode is off on the bot.** `savePreparedInlineMessage` — the whole
-  share flow — requires it. Run `/setinline` in BotFather before testing a
-  share. Nothing in the code can detect this ahead of the first share attempt;
-  it surfaces as a 400 from the Bot API, which `prepareShare` turns into
-  `share_unavailable` rather than a crash.
+- **Inline mode is a BotFather setting the code cannot check.**
+  `savePreparedInlineMessage` — the whole share flow — requires it, and it is
+  off by default on a new bot. Nothing detects this ahead of the first share
+  attempt: it surfaces as a 400 from the Bot API, which `prepareShare` turns
+  into `share_unavailable` rather than a crash. So the share flow can be
+  wholly broken on a fresh token while every test still passes. Run
+  `/setinline` in BotFather and confirm with `getMe` that
+  `supports_inline_queries` is `true`. **Verified true for
+  `@multiplayer_pong_bot`**, the token in local `.env`.
 - **The image is built and verified on arm64 only.** The uWS prune is
   arch-agnostic by construction, but a fly deploy targets x64 and has not been
   run.
