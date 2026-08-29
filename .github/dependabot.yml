@@ -1,0 +1,43 @@
+version: 2
+# `groups:` collapses each ecosystem's weekly bumps into ONE PR — and therefore
+# one CI run — instead of N independent PRs that each pay for a full Docker
+# build and three integration-test runners.
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # One lockfile at the root covers all three workspace packages, so one entry
+  # covers the whole monorepo.
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      workspace:
+        patterns: ["*"]
+    ignore:
+      # Colyseus is pinned EXACTLY (no caret) across server, client and
+      # game-core, and the schema encoder must agree byte-for-byte on both
+      # sides of the wire. A bump is a coordinated change to four pins plus a
+      # netcode re-check, not something to review as a routine dependency PR.
+      - dependency-name: "@colyseus/*"
+      - dependency-name: "colyseus"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      docker:
+        patterns: ["*"]
+    ignore:
+      # Node majors are a manual migration: `engines` requires >=22, and the
+      # runtime stage must keep matching the Node ABI that uWebSockets.js ships
+      # a prebuilt binary for.
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]

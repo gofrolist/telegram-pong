@@ -103,9 +103,7 @@ def best_lag(paddle_dx: np.ndarray, ball_dx: np.ndarray) -> float:
     return best
 
 
-def block_reaction_lags(
-    paddle_dx: np.ndarray, ball_dx: np.ndarray, tick_rate: int
-) -> np.ndarray:
+def block_reaction_lags(paddle_dx: np.ndarray, ball_dx: np.ndarray, tick_rate: int) -> np.ndarray:
     """Per-block best-fit lag, in milliseconds.
 
     A human's lag wanders between blocks — they tire, they anticipate, they
@@ -277,9 +275,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=int, default=1, help="lookback window in days")
     parser.add_argument("--game", default="pong")
-    parser.add_argument(
-        "--dry-run", action="store_true", help="report without writing any flags"
-    )
+    parser.add_argument("--dry-run", action="store_true", help="report without writing any flags")
     args = parser.parse_args()
 
     url = os.environ.get("DATABASE_URL")

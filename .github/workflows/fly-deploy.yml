@@ -1,0 +1,206 @@
+name: Fly Deploy
+# Release-triggered. Publishing a GitHub Release (`gh release create v0.1.1
+# --generate-notes`, or "Draft a release" in the UI) deploys the tagged commit;
+# a bare `git push --tags` deploys NOTHING, and neither does a push to main.
+# Publishing the Release is the one and only deploy gate.
+#
+# Why the deliberate gate, when a small project would normally just ship main:
+# this app is ONE fly machine holding every room in memory. A deploy sends
+# SIGTERM, the entry point drains the matchmaker, and every live match ends up
+# reconnecting while every open invite that has not been tapped yet dies with
+# the process. That is an acceptable cost a few times a week and an unacceptable
+# one on every commit, so shipping is something you decide to do.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      skip_ci_check:
+        description: "Deploy even if the CI workflow is not green for this commit"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  # Reading the CI conclusion for the commit being deployed.
+  checks: read
+
+concurrency:
+  group: fly-deploy
+  # NEVER cancel a deploy in flight. Half of this job mutates production —
+  # migrations applied, an image pushed, a machine mid-replace — and a
+  # cancellation between those steps leaves the app in a state no later run
+  # knows how to reason about. Deploys queue; they do not race.
+  cancel-in-progress: false
+
+env:
+  FLY_APP: telegram-pong
+  HEALTH_URL: https://telegram-pong.fly.dev/healthz
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # On a `release` event github.sha is the TAGGED commit, so this checks out
+      # exactly what the Release points at. On workflow_dispatch it is whatever
+      # ref you picked in the Actions UI.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The Release is cut by hand, so nothing otherwise stops one being cut
+      # from a red commit. CI already ran on this SHA when it landed on main;
+      # this just refuses to ship if it was not green. The escape hatch is a
+      # manual run with skip_ci_check — for the case where the deploy itself is
+      # the fix and CI is failing on something unrelated.
+      - name: Require a green CI run for this commit
+        if: ${{ !inputs.skip_ci_check }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          conclusion=$(gh api "repos/${{ github.repository }}/commits/${SHA}/check-runs" \
+            --jq '[.check_runs[] | select(.name == "CI")] | first | .conclusion // "missing"')
+          echo "CI check for ${SHA}: ${conclusion}"
+          if [ "$conclusion" != "success" ]; then
+            echo "::error::CI is '${conclusion}' for ${SHA} — refusing to deploy. Fix main and cut a new release, or re-run this workflow manually with skip_ci_check."
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # Built here rather than by fly's remote builder for one reason: the
+      # migration step below has to run the EXACT image this deploy ships, and
+      # that means holding it locally before fly ever sees it. The gha cache is
+      # warm from the CI run of this same commit on main (Actions cache reads
+      # fall back to the default branch), so this is usually a few layer pulls.
+      - name: Build the image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: pong:deploy
+          cache-from: type=gha
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1
+
+      - name: Push the image to fly's registry
+        id: push
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          flyctl auth docker
+          docker tag pong:deploy "registry.fly.io/${FLY_APP}:${SHA}"
+          docker push "registry.fly.io/${FLY_APP}:${SHA}"
+          # Deploy by immutable content digest rather than by the :sha tag, so
+          # what boots in production is content-addressed and cannot be swapped
+          # by an overwritten tag between this step and the deploy.
+          digest=$(docker buildx imagetools inspect "registry.fly.io/${FLY_APP}:${SHA}" \
+            --format '{{.Manifest.Digest}}')
+          echo "Deploy ref: registry.fly.io/${FLY_APP}@${digest}"
+          echo "image_ref=registry.fly.io/${FLY_APP}@${digest}" >> "$GITHUB_OUTPUT"
+
+      # Runs the compiled migrator that ships INSIDE the image
+      # (build/db/migrate.js + the drizzle/ folder beside it), so the schema is
+      # migrated by exactly the code being deployed — not by a drizzle-kit on
+      # the runner that may resolve a different version.
+      #
+      # MIGRATION_DATABASE_URL must be Neon's DIRECT connection string, not the
+      # pooled one: pgbouncer in transaction mode cannot hold the session-level
+      # advisory lock a migration takes, and DDL through a pooler can interleave
+      # with itself. The migrator warns loudly if it sees `-pooler.` in the host.
+      #
+      # Before the deploy, deliberately: for the minutes between these two
+      # steps the OLD code runs against the NEW schema, which is fine for
+      # additive migrations and is why they should stay additive. A destructive
+      # column drop needs two releases.
+      - name: Run database migrations
+        env:
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MIGRATION_DATABASE_URL}" ]; then
+            echo "::error::MIGRATION_DATABASE_URL is not set. Add Neon's DIRECT connection string as a repository secret."
+            exit 1
+          fi
+          docker run --rm \
+            -e MIGRATION_DATABASE_URL \
+            pong:deploy \
+            node build/db/migrate.js
+
+      - name: Capture the current image, for rollback
+        id: rollback
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          current=$(flyctl machine list --app "$FLY_APP" --json | jq -r '.[0].config.image // empty')
+          echo "image=$current" >> "$GITHUB_OUTPUT"
+          echo "Rollback target: ${current:-unknown}"
+
+      - name: Deploy to fly
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          IMAGE_REF: ${{ steps.push.outputs.image_ref }}
+        run: |
+          set -euo pipefail
+          # --ha=false is load-bearing, not a cost saving. fly will happily add
+          # a second machine for availability, and a second machine breaks the
+          # product: a Colyseus room lives in the memory of ONE machine, so a
+          # request routed to the other one cannot find the room the invite
+          # names. See the comment at the top of fly.toml.
+          #
+          # No blue-green either, for the same reason — two machines briefly
+          # serving the same app is exactly the state this design forbids. The
+          # deploy is a stop-and-replace, which is why it is release-gated.
+          flyctl deploy --app "$FLY_APP" --image "$IMAGE_REF" --ha=false
+
+      - name: Verify the deployment is serving
+        run: |
+          echo "Polling ${HEALTH_URL}"
+          for attempt in $(seq 1 24); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$HEALTH_URL" || true)
+            if [ "$code" = "200" ]; then
+              echo "Healthy (HTTP 200) on attempt ${attempt}"
+              exit 0
+            fi
+            echo "Attempt ${attempt}/24: HTTP ${code:-000} — retrying in 5s"
+            sleep 5
+          done
+          echo "::error::The app never became healthy after the deploy. Check 'flyctl logs --app ${FLY_APP}' for boot errors, then roll back with: flyctl deploy --app ${FLY_APP} --image ${{ steps.rollback.outputs.image }}"
+          exit 1
+
+      # The health check above only proves the HTTP half booted. The bot half
+      # registers Telegram's webhook after `listen`, and its failure is
+      # deliberately swallowed (`[boot] webhook registration failed`, then the
+      # process carries on) so that a Bot API blip does not take the game server
+      # down with it. The cost of that choice is a deploy that looks perfectly
+      # green while every /play command goes nowhere — so read the logs and say
+      # so here.
+      - name: Verify Telegram's webhook was registered
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 6); do
+            logs=$(flyctl logs --app "$FLY_APP" --no-tail 2>/dev/null | tail -300 || true)
+            if echo "$logs" | grep -qF '[boot] webhook registration failed'; then
+              echo "$logs" | grep -F -A 3 '[boot] webhook registration failed' | tail -10
+              echo "::error::The server is serving but Telegram's webhook was NOT registered — the bot is deaf. Check the token and PUBLIC_SERVER_URL secrets, then redeploy. Roll back with: flyctl deploy --app ${FLY_APP} --image ${{ steps.rollback.outputs.image }}"
+              exit 1
+            fi
+            if echo "$logs" | grep -qF '[bot] webhook registered at'; then
+              echo "$logs" | grep -F '[bot] webhook registered at' | tail -1
+              exit 0
+            fi
+            echo "Attempt ${attempt}/6: no webhook line in the log window yet — retrying in 5s"
+            sleep 5
+          done
+          echo "::warning::Neither a webhook success nor a failure line appeared in the log window. Confirm by hand: curl \"https://api.telegram.org/bot<token>/getWebhookInfo\""
