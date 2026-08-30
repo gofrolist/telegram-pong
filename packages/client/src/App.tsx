@@ -232,7 +232,12 @@ export function App() {
 
   switch (screen.kind) {
     case 'booting':
-      return <div className="screen screen--centered">{t('app.loading')}</div>;
+      // Deliberately not translated. This screen is on screen *before* i18n is
+      // initialised — initialisation needs the language the auth exchange
+      // returns — so `t` here is react-i18next's not-ready stub and would
+      // render the literal key `app.loading` at the user. An ellipsis says the
+      // same thing in every language.
+      return <div className="screen screen--centered">…</div>;
 
     case 'outside-telegram':
       return <div className="screen screen--centered">{t('app.openInTelegram')}</div>;
