@@ -297,6 +297,7 @@ export function App() {
           mySide={screen.side}
           inviteUrl={screen.inviteUrl}
           inviteRoomCode={screen.inviteRoomCode}
+          platform={environment?.platform ?? 'unknown'}
           onFinished={handleFinished}
           onLeave={handleLeave}
         />

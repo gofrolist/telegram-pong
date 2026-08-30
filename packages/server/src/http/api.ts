@@ -608,6 +608,9 @@ export function mountApi(app: Application): void {
         'share_message_failed',
         'rematch_tapped',
         'invite_shared',
+        // One netcode summary per player per match. The client keeps bounded
+        // samples during play and posts percentiles once, at the end.
+        'netcode_sample',
       ]);
       if (!allowed.has(name)) {
         res.status(400).json({ error: 'unknown_event' });

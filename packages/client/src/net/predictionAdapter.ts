@@ -42,6 +42,30 @@ export interface RenderSnapshot {
   topX: number;
 }
 
+/**
+ * What the reconciler knows about how well prediction is going.
+ *
+ * The two drift figures are the ones that separate the two very different
+ * problems a wandering ball can have, and the SDK is explicit about how to
+ * read them: a steady nonzero `ema` is divergence — the prediction is
+ * persistently wrong and the ball is being rubber-banded — whereas a `peak`
+ * spiking over a low `ema` is network jitter. Both near zero means the
+ * prediction matched the server, and anything visibly wrong on screen is a
+ * rendering problem rather than a netcode one.
+ */
+export interface NetcodeStats {
+  /** Unacknowledged inputs. Times the tick interval, this is the round trip. */
+  pending: number;
+  /** Size of the most recent correction, in field units. */
+  correction: number;
+  /** Persistent drift. Steady and nonzero means divergence. */
+  driftEma: number;
+  /** Recent decaying max. A spike over a low `ema` means jitter. */
+  driftPeak: number;
+  /** Increments once per reconcile; differences count reconciles. */
+  reconcileSeq: number;
+}
+
 /** The replicated sub-schemas the simulation runs over. */
 interface WorldRefs {
   meta: MatchMeta;
@@ -73,8 +97,8 @@ export interface PredictionHandle {
   frame(desiredTargetX: number, now: number): void;
   /** Smoothed positions for this frame. Safe to call after `frame`. */
   read(): RenderSnapshot;
-  /** Diagnostics for the netcode HUD. */
-  stats(): { pending: number; correction: number };
+  /** Diagnostics for the overlay and for the end-of-match netcode summary. */
+  stats(): NetcodeStats;
   dispose(): void;
 }
 
@@ -167,10 +191,13 @@ export async function attachPrediction(room: PongRoom, mySide: Side): Promise<Pr
       };
     },
 
-    stats() {
+    stats(): NetcodeStats {
       return {
         pending: sim.pendingCount,
         correction: sim.lastCorrectionMag,
+        driftEma: sim.drift.ema,
+        driftPeak: sim.drift.peak,
+        reconcileSeq: sim.reconcileSeq,
       };
     },
 

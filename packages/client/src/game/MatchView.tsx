@@ -22,6 +22,7 @@ import { attachPrediction, type PredictionHandle } from '../net/predictionAdapte
 import type { PongRoomHandle } from '../net/client.js';
 import { canSharePreparedMessage, sharePreparedMessage } from '../telegram.js';
 import { loadNetcodeOverlay } from '../debug/netcode.js';
+import { NetcodeSampler } from '../net/netcodeSampler.js';
 import { draw, pointerToFieldX, resizeCanvas, type Theme, type Viewport } from './renderer.js';
 
 export interface MatchOutcome {
@@ -45,6 +46,15 @@ interface Props {
   inviteUrl?: string | null;
   /** The room the invite opens; the server re-encodes the link from it. */
   inviteRoomCode?: string | null;
+  /**
+   * Telegram's platform tag (`ios`, `android`, `tdesktop`, `web`…).
+   *
+   * Carried only for the netcode summary. Every platform is a different
+   * webview with its own frame scheduling, and a drift figure means something
+   * different on each — so a report without it is barely comparable to the
+   * next one.
+   */
+  platform: string;
   onFinished(outcome: MatchOutcome): void;
   onLeave(): void;
 }
@@ -73,6 +83,7 @@ export function MatchView({
   mySide,
   inviteUrl,
   inviteRoomCode,
+  platform,
   onFinished,
   onLeave,
 }: Props) {
@@ -83,6 +94,16 @@ export function MatchView({
    * pointer event and must never trigger a render.
    */
   const desiredXRef = useRef<number>(50);
+
+  /**
+   * The netcode summary in progress.
+   *
+   * A ref rather than state, for the same reason as `desiredXRef`: it is
+   * written on every frame and must never cause a render. It lives at
+   * component scope because the frame loop fills it and a different effect —
+   * the one that notices the match ended — is what sends it.
+   */
+  const samplerRef = useRef<NetcodeSampler>(new NetcodeSampler());
 
   const [phase, setPhase] = useState<number>(Phase.WAITING);
   const [reconnectSeconds, setReconnectSeconds] = useState(0);
@@ -157,6 +178,12 @@ export function MatchView({
       // clock inside this callback instead would hand the interpolation a
       // jittery dt and put a visible wobble on the ball.
       prediction?.frame(desiredXRef.current, now);
+
+      // Frames are counted even before prediction attaches, so the fps figure
+      // describes the whole time the player was looking at the field rather
+      // than only the part that was instrumented.
+      if (prediction) samplerRef.current.frame(now, () => prediction!.stats());
+
 
       // Until prediction is attached, draw the replicated state directly. It
       // is a fraction of a second on join, and a still countdown screen.
@@ -236,6 +263,26 @@ export function MatchView({
         const selfScore = mySide === SIDE_BOTTOM ? state.meta.scoreBottom : state.meta.scoreTop;
         const opponentScore = mySide === SIDE_BOTTOM ? state.meta.scoreTop : state.meta.scoreBottom;
         window.clearInterval(interval);
+
+        // One netcode row per player per match, sent at the only moment the
+        // whole match is known. `summarize` returns null when there is too
+        // little to be worth a row — a match that ended on a disconnect would
+        // otherwise contribute noise indistinguishable from signal.
+        const summary = samplerRef.current.summarize(performance.now());
+        if (summary) {
+          api.reportEvent('netcode_sample', {
+            matchId: state.matchId,
+            props: {
+              ...summary,
+              // The two things that make the numbers comparable across
+              // reports: which client drew them, and how far the player was
+              // from the machine. Neither is derivable server-side.
+              platform,
+              rallyHits: state.meta.rallyHits,
+            },
+          });
+        }
+
         onFinished({
           matchId: state.matchId,
           scoreSelf: selfScore,
@@ -249,7 +296,7 @@ export function MatchView({
     }, 200);
 
     return () => window.clearInterval(interval);
-  }, [room, mySide, onFinished]);
+  }, [room, mySide, onFinished, platform]);
 
   // ---------------------------------------------------------------------
   // Touch
