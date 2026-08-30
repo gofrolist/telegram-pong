@@ -232,6 +232,15 @@ body {
   pointer-events: none;
 }
 
+/* ...but its controls are not informational. Without this the invite buttons
+   are painted, look enabled, and silently swallow every tap, because the rule
+   above applies to the whole subtree. Re-enabling it per control keeps the
+   canvas reachable in the gaps between them, which is the point of the rule. */
+.match__overlay button,
+.match__overlay .card__link {
+  pointer-events: auto;
+}
+
 .match__overlay-title {
   font-size: 22px;
   font-weight: 700;
