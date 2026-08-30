@@ -210,8 +210,12 @@ describe('prediction under 150ms RTT', () => {
       if (frames % 12 === 0) {
         droppedInputs++;
       } else {
-        predictionA.frame(targetA);
-        predictionB.frame(targetB);
+        // The rAF timestamp in a browser; here, the same monotonic clock the
+        // loop would be driven by. Passing it is what keeps the render
+        // interpolation advancing on an even dt.
+        const now = performance.now();
+        predictionA.frame(targetA, now);
+        predictionB.frame(targetB, now);
       }
 
       const predicted = predictionA.read();
