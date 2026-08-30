@@ -164,6 +164,11 @@ export interface SeatOptions {
   hostWaitMs?: number;
   /** Correction easing window, in ms. Defaults to the client's own constant. */
   smoothMs?: number;
+  /**
+   * Teleport threshold in field units: corrections bigger than this POP
+   * instead of easing. Undefined leaves it off, which is the shipped default.
+   */
+  snap?: number;
 }
 
 /** Two authenticated clients, seated in one room, both predicting. */
@@ -192,6 +197,7 @@ export async function seatTwoPlayers(
   if (hostWaitMs > 0) {
     const waitingPrediction = await attachPrediction(roomA, SIDE_BOTTOM, {
       smoothMs: options.smoothMs,
+      snap: options.snap,
     });
     const startedAt = performance.now();
     while (performance.now() - startedAt < hostWaitMs) {
@@ -213,7 +219,7 @@ export async function seatTwoPlayers(
   const sideA = roomA.state.players.get(roomA.sessionId)!.side === SIDE_TOP ? SIDE_TOP : SIDE_BOTTOM;
   const sideB = roomB.state.players.get(roomB.sessionId)!.side === SIDE_TOP ? SIDE_TOP : SIDE_BOTTOM;
 
-  const tuning = { smoothMs: options.smoothMs };
+  const tuning = { smoothMs: options.smoothMs, snap: options.snap };
   const [predictionA, predictionB] = await Promise.all([
     attachPrediction(roomA, sideA, tuning),
     attachPrediction(roomB, sideB, tuning),

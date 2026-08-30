@@ -367,9 +367,9 @@ tested. It has nothing for the opponent's, whose paddle is only ever as current
 as the last patch.
 
 That gap is geometry, and it has a number. The opponent's paddle crosses its own
-13-unit contact zone in `13 / 190 = 68ms` of one-way latency. Past that, whether
-the ball is coming back is genuinely unknowable on this device, and predicting it
-is a coin flip that the server overturns one round trip later:
+12.3-unit contact zone in `12.3 / 190 = 65ms` of one-way latency. Past that,
+whether the ball is coming back is genuinely unknowable on this device, and
+predicting it is a coin flip that the server overturns one round trip later:
 
 ```
  rtt | wobble~ | ball corr max | mispredicted reversals / 30s
@@ -389,15 +389,83 @@ produced one. Two fixes were tried and measured, and both were reverted:
   ball being reliably jerky.
 - **Retuning the correction easing.** `smoothMs` 65 is already the optimum;
   0 (snap) and 200 (long ease) both measured worse on drawn-ball smoothness.
+- **A `snap` threshold** — the SDK's teleport cutoff, which pops a correction
+  bigger than N instead of easing it out, so a mispredicted reversal is one cut
+  rather than 65ms of the ball curving the wrong way. Swept off/8/15/100 over
+  ten 30s bot matches per arm (`bun run bots --snap N`). Two findings, and the
+  second is why it is not shipped:
+
+  *Small thresholds do nothing,* because the smoothed pose mixes position and
+  velocity fields and `snap` is all-or-nothing across them. A bounce corrects
+  `ball.vx` by 100-230 units/s, so a threshold of 8 or 15 is tripped by nearly
+  every reconcile and degenerates into `smoothMs: 0` — already known worse.
+  Measured: median wobble 0.0082 off, 0.0126 at 8, 0.0084 at 15, none of it
+  significant (Mann-Whitney |z| < 0.9). The SDK's sizing advice, "above
+  `maxSpeed x patch interval`", silently assumes a position-only pose.
+
+  *A threshold above the velocity noise floor helps at 174ms and hurts at
+  300ms.* At 100 the effect at 174ms is a variance collapse rather than a shift
+  — mean 0.0145 -> 0.0055, worst match 0.0465 -> 0.0068, four matches in ten
+  over 0.015 -> none (variance ratio F(9,9) = 142). But at 300ms the same
+  setting measured **4.5x worse**, 0.0109 -> 0.0488, with complete separation
+  between the arms (Mann-Whitney z = -3.36; the best snap match was worse than
+  the worst non-snap one). The reason is the trade itself: `snap` swaps a rare
+  smooth-but-wrong glide for a hard cut, and at 300ms mispredictions stop being
+  rare, so the ball pops constantly. A tuning that helps where the game is
+  already fine and hurts where it is not is backwards, so it stays off.
+
+  One caveat on the metric, since it flatters `snap`: wobble is sampled only in
+  open field, and the pop lands at the far paddle (outside the band) while the
+  glide's tail extends into it. The 174ms improvement is therefore an upper
+  bound, and whether the cut itself reads badly is a question for eyes, not for
+  this harness. `--snap` is wired through the harness so the sweep is
+  repeatable; production leaves it unset.
 
 What is left is a real trade against game feel — a wider, slower paddle moves the
-cliff from 137ms RTT to 277ms and was measured 7-10x smoother at 300-414ms — and
+cliff from ~129ms RTT to 277ms and was measured 7-10x smoother at 300-414ms — and
 that is a design decision, not a netcode one. It has deliberately not been taken.
+
+**The trade runs the other way too, and it is mostly about ball speed.** When the
+rally speed-up was steepened so players could feel it, the first attempt
+(`BALL_SPEEDUP` 1.045 → 1.09, ceiling left at 132) measured 16.5 mispredicted far
+reversals per 30s at 174ms RTT against the old build's 4.0, with ball correction
+29.6 against 2.4 — a cliff dragged down from ~300ms to under 174ms. The cause is
+the same geometry read forwards: a quicker ball gives the opponent less time to
+reach the interception, so their paddle is still *moving* when it arrives, and a
+moving far paddle is exactly what this client cannot predict.
+
+The fix was to lower the ceiling as the ramp got steeper — 1.07 with a 115 cap,
+which measured 4.3 reversals and 2.4 correction, level with the old build. That
+pairing is *faster* than the old one at every hit count a rally actually reaches
+(81 units/s by the fourth hit against 74, 114 by the ninth against 92); only the
+number it converges on came down, and 132 was never reached in play anyway. Top
+speed, not acceleration, is what the far paddle charges for.
 
 ### Controls
 
 Finger tracking along the field; the paddle follows X. Not buttons. Vertical
 orientation, paddles top and bottom, because phone screens are narrow.
+
+**The paddle is kept out from under the finger steering it.** Two independent
+moves, because one of them is free and the other is not. `PADDLE_INSET` (18
+units) is replicated geometry and costs both players rally length, so it buys
+the guaranteed part of the clearance; the renderer then spends the *letterbox* —
+the dead band left over when a 100x180 field is fitted to a taller screen — on
+the same problem, biasing the field upwards by up to 56px rather than centring
+it. That part is per-device slack that was previously thrown away, and the
+simulation never sees it.
+
+**The paddle's striking face is a convex arc, not a bar.** The ball leaves along
+the surface normal at the point it touched, so the return angle is something a
+player reads off the curve in front of them rather than something they have to
+learn: hit the middle of the bulge and it goes back the way it came, hit towards
+an end, where the face has turned away, and it cuts — up to `asin(11/17)` ≈ 40°.
+The incoming direction is deliberately discarded; a true reflection would make
+the return a function of two things the player is tracking separately. What is
+drawn is exactly what is solved against — the renderer strokes the arc at
+`PADDLE_ARC_R - PADDLE_THICKNESS / 2` so the bar's outer edge lands on the
+contact radius — because a curved paddle whose curve is decorative is worse than
+a flat one.
 
 The client sends a **desired** paddle position and the server moves the paddle
 under a hard speed cap. That one rule eliminates the teleporting-paddle cheat,

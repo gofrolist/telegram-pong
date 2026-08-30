@@ -23,12 +23,13 @@ import {
   BALL_SPEEDUP,
   BALL_START_SPEED,
   BOTTOM_PLANE_Y,
-  BOUNCE_SKEW,
   COUNTDOWN_TICKS,
   FIELD_H,
   FIELD_W,
   FIRST_SERVE_COUNTDOWN_TICKS,
   MIN_VERTICAL_RATIO,
+  PADDLE_ARC_R,
+  PADDLE_BULGE,
   PADDLE_HALF_W,
   PADDLE_MAX_SPEED,
   SCORE_TO_WIN,
@@ -51,8 +52,39 @@ import {
 const PADDLE_MIN_X = PADDLE_HALF_W;
 const PADDLE_MAX_X = FIELD_W - PADDLE_HALF_W;
 
-/** Half-width of the region in which a ball counts as struck. */
-const CONTACT_HALF_W = PADDLE_HALF_W + BALL_RADIUS;
+/**
+ * The paddle's striking face is an arc, not a bar.
+ *
+ * Every number below is the same circle seen three ways. The face is the piece
+ * of a circle of radius {@link PADDLE_ARC_R} that spans the paddle's width,
+ * bulging towards the middle of the field; the arc's centre sits behind the
+ * paddle, on the goal side.
+ *
+ * Solving the bounce against a circle rather than a plane is what makes the
+ * return angle READABLE: the ball leaves along the surface normal at the point
+ * it touched, and that point is on the curve the player can see. It is also
+ * still exact and still deterministic — a segment against a circle is one
+ * quadratic, and `Math.sqrt` is the one irrational operation IEEE-754 pins
+ * down exactly, so it agrees bit-for-bit with the server.
+ */
+/** Y of the centre of the arc the bottom paddle's face is cut from. */
+const BOTTOM_ARC_CY = BOTTOM_PLANE_Y - PADDLE_BULGE + PADDLE_ARC_R;
+/** Y of the centre of the arc the top paddle's face is cut from. */
+const TOP_ARC_CY = TOP_PLANE_Y + PADDLE_BULGE - PADDLE_ARC_R;
+/** Distance from that centre at which a ball is exactly touching the face. */
+const CONTACT_R = PADDLE_ARC_R + BALL_RADIUS;
+
+/**
+ * Half-width of the region in which a ball counts as struck.
+ *
+ * Derived from the arc rather than authored: a ball touching the very end of
+ * the face has its centre pushed outwards along that end's normal, which puts
+ * it `PADDLE_HALF_W * CONTACT_R / PADDLE_ARC_R` from the paddle's centre. That
+ * is a shade under the flat paddle's `PADDLE_HALF_W + BALL_RADIUS`, because
+ * the arc's ends are the part that recedes — the paddle really is slightly
+ * less forgiving at the tips now, and it looks it.
+ */
+const CONTACT_HALF_W = (PADDLE_HALF_W * CONTACT_R) / PADDLE_ARC_R;
 
 /** Upper bound on collision resolutions in a single tick. */
 const MAX_SUBSTEPS = 8;
@@ -134,39 +166,116 @@ function serve(world: PongWorld): void {
 }
 
 /**
- * Reflect the ball off a paddle, skewing the angle by the contact offset.
+ * Send the ball back along the paddle face's normal at the point of contact.
  *
- * `planeSide` is the side that owns the paddle; the ball leaves along -Y for
- * the bottom paddle and +Y for the top one.
+ * The ball is sitting exactly {@link CONTACT_R} from `arcCy` when this is
+ * called — `advanceBall` has already stepped it to the moment of touch — so
+ * the vector from the arc's centre through the ball IS the surface normal, and
+ * normalising it is the entire bounce.
+ *
+ * The incoming direction is deliberately discarded. That is not an
+ * approximation of a physical reflection, it is the opposite of one: a true
+ * reflection makes the return angle a function of two things the player is
+ * tracking separately, whereas this makes it a function of one thing they can
+ * see — where on the curve they caught it. Hit the middle of the bulge and the
+ * ball goes back the way it came; hit near an end, where the face has turned
+ * away, and it cuts. The steepest cut the geometry allows is
+ * `asin(PADDLE_HALF_W / PADDLE_ARC_R)` ≈ 40°.
  */
-function bounceOffPaddle(world: PongWorld, side: Side, paddle: PaddleLike): void {
-  const offset = world.ball.x - paddle.x;
-  let normalised = offset / CONTACT_HALF_W;
-  if (normalised < -1) normalised = -1;
-  else if (normalised > 1) normalised = 1;
+function bounceOffPaddle(world: PongWorld, paddle: PaddleLike, arcCy: number): void {
+  const ball = world.ball;
 
-  let speed = world.ball.speed * BALL_SPEEDUP;
+  let speed = ball.speed * BALL_SPEEDUP;
   if (speed > BALL_MAX_SPEED) speed = BALL_MAX_SPEED;
 
-  let dx = normalised * BOUNCE_SKEW;
-  let dy = side === SIDE_BOTTOM ? -1 : 1;
-
+  let dx = ball.x - paddle.x;
+  let dy = ball.y - arcCy;
   let length = Math.sqrt(dx * dx + dy * dy);
-  dx /= length;
-  dy /= length;
+  if (length > 0) {
+    dx /= length;
+    dy /= length;
+  } else {
+    // Unreachable from a real contact — the ball would have to be standing on
+    // the arc's centre, well behind the face. Guarded anyway: a zero here
+    // would divide a NaN into the velocity and there is no recovering a world
+    // once the ball's direction is NaN.
+    //
+    // The fallback is read off the ARC, not off the ball: a zero length means
+    // `ball.y === arcCy`, so any comparison between the two is decided by that
+    // equality rather than by which paddle this is. The arc's centre always
+    // sits on the goal side of its own paddle, so the field's centre is the
+    // direction the ball has to leave in.
+    dx = 0;
+    dy = arcCy > FIELD_H / 2 ? -1 : 1;
+  }
 
   // Keep a floor under the vertical component so a rally cannot degenerate
-  // into a ball creeping sideways along the paddle line.
+  // into a ball creeping sideways along the paddle line. The arc cannot
+  // currently produce one — see MIN_VERTICAL_RATIO.
   if (dy < 0 && dy > -MIN_VERTICAL_RATIO) dy = -MIN_VERTICAL_RATIO;
   else if (dy > 0 && dy < MIN_VERTICAL_RATIO) dy = MIN_VERTICAL_RATIO;
   length = Math.sqrt(dx * dx + dy * dy);
   dx /= length;
   dy /= length;
 
-  world.ball.speed = speed;
-  world.ball.vx = dx * speed;
-  world.ball.vy = dy * speed;
+  ball.speed = speed;
+  ball.vx = dx * speed;
+  ball.vy = dy * speed;
   world.meta.rallyHits += 1;
+}
+
+/**
+ * Time within `limit` at which the ball first touches a paddle's arc, or -1.
+ *
+ * The swept test: the ball's centre travels a straight segment, and it touches
+ * a face of radius {@link PADDLE_ARC_R} exactly when its centre reaches
+ * {@link CONTACT_R} from that face's centre. One quadratic, solved for the
+ * near root — the moment of *entry*, never the exit.
+ *
+ * Both early returns matter:
+ *  - `c <= 0` means the ball is already inside the contact circle, and it does
+ *    two jobs. On the substep straight after a bounce the ball is sitting on
+ *    the surface to within a rounding error, and taking a root there would
+ *    bounce it a second time and pin it to the paddle. Across ticks it is also
+ *    what makes a MISS stay missed: `facesLive` only survives one tick, so a
+ *    ball that went round the end of the face and is now inside the circle
+ *    would otherwise be re-tested on the next tick and struck from behind.
+ *  - `b >= 0` means the ball is moving away from the arc's centre, so there is
+ *    nothing ahead of it to hit.
+ *
+ * The pair makes the paddle's tips stricter than the old flat bar's, which
+ * would catch anything within `PADDLE_HALF_W + BALL_RADIUS` at the moment the
+ * ball crossed the plane, however late the paddle arrived. Here, a ball that
+ * enters the contact circle off the arc has — provably, for a ball with any
+ * downward speed at all — passed below the rim of the face on its way in, so
+ * it is level with the tips rather than in front of them. That is a real
+ * change in feel at the very ends of the paddle, and it is the one the drawn
+ * shape now promises.
+ */
+function arcImpactTime(
+  ball: PongWorld['ball'],
+  paddleX: number,
+  arcCy: number,
+  limit: number,
+): number {
+  const dx = ball.x - paddleX;
+  const dy = ball.y - arcCy;
+
+  const c = dx * dx + dy * dy - CONTACT_R * CONTACT_R;
+  if (c <= 0) return -1;
+
+  const b = 2 * (dx * ball.vx + dy * ball.vy);
+  if (b >= 0) return -1;
+
+  const a = ball.vx * ball.vx + ball.vy * ball.vy;
+  if (a <= 0) return -1;
+
+  const disc = b * b - 4 * a * c;
+  if (disc <= 0) return -1;
+
+  const t = (-b - Math.sqrt(disc)) / (2 * a);
+  if (t <= 0 || t > limit) return -1;
+  return t;
 }
 
 /**
@@ -180,17 +289,17 @@ function bounceOffPaddle(world: PongWorld, side: Side, paddle: PaddleLike): void
 function advanceBall(world: PongWorld, dt: number): void {
   const ball = world.ball;
   let remaining = dt;
-  // Once the ball has passed a paddle plane without being struck, stop testing
-  // the planes: it is on its way to the goal line and must not re-trigger a
-  // zero-length impact at the plane it is sitting exactly on.
-  let planesLive = true;
+  // Once the ball has gone past a paddle without being struck, stop testing
+  // the faces: it is on its way to the goal line, and it is by then INSIDE the
+  // contact circle it just went around, which the impact test would otherwise
+  // keep re-solving.
+  let facesLive = true;
 
   for (let guard = 0; guard < MAX_SUBSTEPS && remaining > 0; guard++) {
     const endX = ball.x + ball.vx * remaining;
-    const endY = ball.y + ball.vy * remaining;
 
     let toi = remaining;
-    // 0 = no impact, 1 = side wall, 2 = bottom paddle plane, 3 = top plane.
+    // 0 = no impact, 1 = side wall, 2 = bottom paddle face, 3 = top face.
     let kind = 0;
 
     if (ball.vx < 0) {
@@ -212,24 +321,20 @@ function advanceBall(world: PongWorld, dt: number): void {
       }
     }
 
-    if (planesLive) {
+    if (facesLive) {
+      // Only the face the ball is flying at is worth solving; the one behind
+      // it can only be reached by a ball that has already scored.
       if (ball.vy > 0) {
-        const limit = BOTTOM_PLANE_Y - BALL_RADIUS;
-        if (ball.y <= limit && endY > limit) {
-          const t = (limit - ball.y) / ball.vy;
-          if (t < toi) {
-            toi = t;
-            kind = 2;
-          }
+        const t = arcImpactTime(ball, world.bottom.x, BOTTOM_ARC_CY, toi);
+        if (t >= 0) {
+          toi = t;
+          kind = 2;
         }
       } else if (ball.vy < 0) {
-        const limit = TOP_PLANE_Y + BALL_RADIUS;
-        if (ball.y >= limit && endY < limit) {
-          const t = (limit - ball.y) / ball.vy;
-          if (t < toi) {
-            toi = t;
-            kind = 3;
-          }
+        const t = arcImpactTime(ball, world.top.x, TOP_ARC_CY, toi);
+        if (t >= 0) {
+          toi = t;
+          kind = 3;
         }
       }
     }
@@ -243,14 +348,18 @@ function advanceBall(world: PongWorld, dt: number): void {
       if (ball.x < BALL_RADIUS) ball.x = BALL_RADIUS;
       else if (ball.x > FIELD_W - BALL_RADIUS) ball.x = FIELD_W - BALL_RADIUS;
     } else if (kind === 2 || kind === 3) {
-      const side: Side = kind === 2 ? SIDE_BOTTOM : SIDE_TOP;
       const paddle = kind === 2 ? world.bottom : world.top;
+      const arcCy = kind === 2 ? BOTTOM_ARC_CY : TOP_ARC_CY;
       const offset = ball.x - paddle.x;
       const distance = offset < 0 ? -offset : offset;
       if (distance <= CONTACT_HALF_W) {
-        bounceOffPaddle(world, side, paddle);
+        bounceOffPaddle(world, paddle, arcCy);
       } else {
-        planesLive = false;
+        // Round the end of the face: the ball is level with the paddle but
+        // outside it, on its way to the goal. Retiring the face here is what
+        // stops the next substep re-solving the same contact circle it is now
+        // sitting inside.
+        facesLive = false;
       }
     } else {
       break;

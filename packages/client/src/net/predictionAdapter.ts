@@ -226,6 +226,15 @@ export interface PredictionHandle {
 export interface PredictionOptions {
   /** Correction easing window. Defaults to {@link PREDICTION_SMOOTH_MS}. */
   smoothMs?: number;
+  /**
+   * Teleport threshold, in field units. A reconcile whose worst per-field
+   * correction exceeds it POPS to server truth instead of easing out over
+   * `smoothMs`.
+   *
+   * Off by default. Exposed so the bot harness can sweep it — see the README
+   * on what the far paddle costs.
+   */
+  snap?: number;
 }
 
 export async function attachPrediction(
@@ -234,6 +243,7 @@ export async function attachPrediction(
   options: PredictionOptions = {},
 ): Promise<PredictionHandle> {
   const smoothMs = options.smoothMs ?? PREDICTION_SMOOTH_MS;
+  const snap = options.snap;
   // The reconciler binds to the *decoded* schema instances, which only exist
   // once the first state patch has been applied — before that, `room.state`
   // holds locally auto-instantiated placeholders with no ref id, and the SDK
@@ -295,6 +305,9 @@ export async function attachPrediction(
       top: state.top,
     },
     smoothMs,
+    // Undefined leaves it off, which is the SDK default: every correction
+    // eases. See PredictionOptions.snap.
+    snap,
     /**
      * Setting this is what makes drift and correction get COMPUTED at all.
      *
