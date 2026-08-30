@@ -358,6 +358,42 @@ The tick therefore uses only `+ - * /`, comparison, `Math.sqrt` and
 `Math.imul`, seeds its PRNG from the room code, and keeps that PRNG state in
 replicated state so a replayed serve draws the same direction.
 
+### What the far paddle costs
+
+Prediction can only be exact about inputs the client has. It has its own, so the
+local paddle and every bounce off it are predicted perfectly — measured at a
+correction of **0.000** and zero mispredicted reversals, at every latency
+tested. It has nothing for the opponent's, whose paddle is only ever as current
+as the last patch.
+
+That gap is geometry, and it has a number. The opponent's paddle crosses its own
+13-unit contact zone in `13 / 190 = 68ms` of one-way latency. Past that, whether
+the ball is coming back is genuinely unknowable on this device, and predicting it
+is a coin flip that the server overturns one round trip later:
+
+```
+ rtt | wobble~ | ball corr max | mispredicted reversals / 30s
+   0 |  0.0003 |          1.14 |  0
+ 120 |  0.0004 |          0.79 |  0
+ 174 |  0.0021 |          2.15 |  0     <- clean
+ 300 |  0.0332 |         58.08 | 18     <- cliff, at 2.2x the contact zone
+ 414 |  0.1377 |         64.42 | 19
+```
+
+Every one of those reversals is at the FAR plane; the near plane has never
+produced one. Two fixes were tried and measured, and both were reverted:
+
+- **Refusing to predict the far bounce** (hold the ball at the plane and wait to
+  be told). Caps the worst positional error, 64 → 20, but adds a pause-and-release
+  to every rally: wobble got 6x worse. The ball being occasionally wrong beats the
+  ball being reliably jerky.
+- **Retuning the correction easing.** `smoothMs` 65 is already the optimum;
+  0 (snap) and 200 (long ease) both measured worse on drawn-ball smoothness.
+
+What is left is a real trade against game feel — a wider, slower paddle moves the
+cliff from 137ms RTT to 277ms and was measured 7-10x smoother at 300-414ms — and
+that is a design decision, not a netcode one. It has deliberately not been taken.
+
 ### Controls
 
 Finger tracking along the field; the paddle follows X. Not buttons. Vertical

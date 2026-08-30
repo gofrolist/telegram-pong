@@ -21,6 +21,9 @@
 
 import { Predict, type Room } from '@colyseus/sdk';
 import {
+  DIVERGENCE_TOLERANCE,
+  PREDICTION_SMOOTH_MS,
+  SIDE_BOTTOM,
   TICK_DT,
   TICK_MS,
   createWorld,
@@ -78,6 +81,34 @@ export interface NetcodeStats {
   /** Increments once per reconcile; differences count reconciles. */
   reconcileSeq: number;
   /**
+   * Correction on the ball's POSITION, in field units. THE number behind "the
+   * ball jumps": it is how far the ball moved sideways when the server
+   * disagreed, on a field 100 wide.
+   */
+  ballCorrection: number;
+  /**
+   * Correction on the ball's VELOCITY. A mispredicted BOUNCE lands here first
+   * and is up to twice the ball's speed, so a big number here with a small
+   * `ballCorrection` means the ball was sent the wrong way and has not
+   * travelled far yet.
+   */
+  ballVelCorrection: number;
+  /**
+   * Correction on the local player's own paddle. Should be ~0 forever: the
+   * client runs the same `movePaddle` over the same inputs the server
+   * consumed. Anything else is a genuine desync — wrong dt, wrong constants,
+   * or an input the server never applied.
+   */
+  selfPaddleCorrection: number;
+  /**
+   * Correction on the OPPONENT's paddle. Nonzero by construction, and not a
+   * bug on its own: the client never sees their inputs, so it can only carry
+   * their last replicated target forward. It matters only when the ball
+   * reaches that paddle during the replay window, which is when it turns into
+   * a mispredicted bounce.
+   */
+  oppPaddleCorrection: number;
+  /**
    * How far ahead of confirmed server truth the drawn world is, in ms.
    *
    * Prediction is *supposed* to run ahead — that is what hides the round trip
@@ -115,6 +146,32 @@ interface WorldRefs {
   ball: Ball;
   bottom: Paddle;
   top: Paddle;
+}
+
+/**
+ * Pose-field groups, for reading a correction as something other than one
+ * undifferentiated number.
+ *
+ * The reconciler reports drift as the worst |delta| across every pose field,
+ * which cannot distinguish "the ball teleported" from "the opponent moved
+ * their paddle and I could not have known". Those need completely different
+ * responses, so they are counted separately.
+ */
+const BALL_POSITION_FIELDS = ['ball.x', 'ball.y'] as const;
+const BALL_VELOCITY_FIELDS = ['ball.vx', 'ball.vy', 'ball.speed'] as const;
+const BOTTOM_PADDLE_FIELDS = ['bottom.x', 'bottom.targetX'] as const;
+const TOP_PADDLE_FIELDS = ['top.x', 'top.targetX'] as const;
+
+/** Worst absolute correction across `fields`. */
+function worstOf(corrections: Record<string, number>, fields: readonly string[]): number {
+  let worst = 0;
+  for (const field of fields) {
+    const value = corrections[field];
+    if (value === undefined) continue;
+    const magnitude = value < 0 ? -value : value;
+    if (magnitude > worst) worst = magnitude;
+  }
+  return worst;
 }
 
 /** Copy the server's authoritative meta over the predicted mirror. */
@@ -166,7 +223,17 @@ export interface PredictionHandle {
  * renderer, never in the simulation, because a mirrored simulation would not
  * be the same simulation.
  */
-export async function attachPrediction(room: PongRoom, mySide: Side): Promise<PredictionHandle> {
+export interface PredictionOptions {
+  /** Correction easing window. Defaults to {@link PREDICTION_SMOOTH_MS}. */
+  smoothMs?: number;
+}
+
+export async function attachPrediction(
+  room: PongRoom,
+  mySide: Side,
+  options: PredictionOptions = {},
+): Promise<PredictionHandle> {
+  const smoothMs = options.smoothMs ?? PREDICTION_SMOOTH_MS;
   // The reconciler binds to the *decoded* schema instances, which only exist
   // once the first state patch has been applied — before that, `room.state`
   // holds locally auto-instantiated placeholders with no ref id, and the SDK
@@ -199,6 +266,11 @@ export async function attachPrediction(room: PongRoom, mySide: Side): Promise<Pr
    * than rebuilt. Its `meta` is the predicted meta itself — the same object
    * the world below hands the reconciler as opaque scratch.
    */
+  // Which paddle is mine decides how a correction on it should be read: mine
+  // must stay at zero, theirs cannot.
+  const selfFields = mySide === SIDE_BOTTOM ? BOTTOM_PADDLE_FIELDS : TOP_PADDLE_FIELDS;
+  const oppFields = mySide === SIDE_BOTTOM ? TOP_PADDLE_FIELDS : BOTTOM_PADDLE_FIELDS;
+
   const view: PongWorld = createWorld(0);
   // Seed it now. The bound entries are mirrored from decoded truth by the
   // constructor; an opaque part is not, and `adopt` first runs on the first
@@ -222,10 +294,26 @@ export async function attachPrediction(room: PongRoom, mySide: Side): Promise<Pr
       bottom: state.bottom,
       top: state.top,
     },
-    // Smoothing over roughly two ticks. Long enough that a correction is a
-    // glide rather than a jump, short enough that the ball is never
-    // meaningfully behind the truth at the moment it reaches a paddle.
-    smoothMs: 65,
+    smoothMs,
+    /**
+     * Setting this is what makes drift and correction get COMPUTED at all.
+     *
+     * The SDK skips every scrap of that bookkeeping unless a tolerance is set
+     * or its debug bundle is loaded — reasonably, since a production build
+     * that reads neither should not pay for it. But this build reads both: the
+     * end-of-match summary sends these numbers home from every device, and
+     * without a tolerance they were being sent as a hard-coded zero by anyone
+     * who had not turned the overlay on. A whole class of report therefore
+     * said "the prediction is perfect" when nothing had been measured, and the
+     * integration test asserting `correction < 0.5` was passing on a value
+     * that was never written.
+     *
+     * The number itself is the console-warning threshold, throttled to one a
+     * second. Set above the drift the OPPONENT'S paddle contributes on its own
+     * — which is unavoidable, since their inputs are not knowable here — so a
+     * warning means something we can actually act on.
+     */
+    warnOnDivergence: DIVERGENCE_TOLERANCE,
     // The bound entries re-seed themselves from the server on every ack; this
     // covers the one part that is opaque on purpose.
     adopt: (world) => {
@@ -237,8 +325,11 @@ export async function attachPrediction(room: PongRoom, mySide: Side): Promise<Pr
       view.ball = world.ball;
       view.bottom = world.bottom;
       view.top = world.top;
-      // The SAME function the server's fixed timestep calls. This identity is
-      // the whole reason the backend is TypeScript.
+      // The SAME function the server's fixed timestep calls, with the same
+      // arguments. This identity is the whole reason the backend is
+      // TypeScript, and an earlier attempt to break it deliberately — having
+      // the client decline to predict the opponent's bounce — measured worse
+      // and was reverted. See README, "What the far paddle costs".
       stepWithInput(view, mySide, command, ctx.dt || TICK_DT);
     },
   });
@@ -279,6 +370,10 @@ export async function attachPrediction(room: PongRoom, mySide: Side): Promise<Pr
         driftEma: sim.drift.ema,
         driftPeak: sim.drift.peak,
         reconcileSeq: sim.reconcileSeq,
+        ballCorrection: worstOf(sim.lastCorrection, BALL_POSITION_FIELDS),
+        ballVelCorrection: worstOf(sim.lastCorrection, BALL_VELOCITY_FIELDS),
+        selfPaddleCorrection: worstOf(sim.lastCorrection, selfFields),
+        oppPaddleCorrection: worstOf(sim.lastCorrection, oppFields),
         // Predicted tick minus replicated tick. `view.meta` IS the predicted
         // meta, and `state.meta` is the newest the server has confirmed.
         leadMs: (view.meta.tick - state.meta.tick) * TICK_MS,
