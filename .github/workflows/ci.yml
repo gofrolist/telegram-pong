@@ -172,7 +172,10 @@ jobs:
       # instead of on the image. DATABASE_URL points at a closed port — the
       # health check deliberately does not touch the database, because a cold
       # Neon compute takes seconds to wake.
-      - name: Boot smoke (the image starts and serves /healthz)
+      #
+      # PUBLIC_CLIENT_URL is deliberately NOT set: the Mini App is served from
+      # this same origin, and leaving it unset is what exercises that default.
+      - name: Boot smoke (the image starts and serves /healthz and the Mini App)
         run: |
           set -euo pipefail
           docker run -d --name pong-smoke -p 2567:2567 \
@@ -184,7 +187,6 @@ jobs:
             -e TELEGRAM_WEBHOOK_SECRET='ci-smoke-webhook-secret-value' \
             -e TELEGRAM_REGISTER_WEBHOOK=false \
             -e PUBLIC_SERVER_URL='http://localhost:2567' \
-            -e PUBLIC_CLIENT_URL='http://localhost:5173' \
             -e SESSION_SECRET='ci-smoke-session-secret-at-least-32-chars' \
             -e DATABASE_URL='postgresql://nobody:nobody@127.0.0.1:1/nowhere' \
             pong:smoke
@@ -193,6 +195,32 @@ jobs:
             if curl -fsS http://localhost:2567/healthz; then
               echo
               echo "healthy after ${attempt}s"
+
+              # The health check only proves the API booted. The Mini App is
+              # the other half of this image — built in stage 1, copied into
+              # the server package in stage 3 — and it can go missing without
+              # the server noticing, which is exactly how the root URL once
+              # served Colyseus's version banner instead of the game. So
+              # assert the shell, and assert the hashed bundle it names is
+              # actually reachable rather than a 404 the shell papers over.
+              root=$(curl -fsS http://localhost:2567/)
+              if ! echo "$root" | grep -q '<div id="root">'; then
+                echo "::error::GET / did not return the Mini App shell. Got:"
+                echo "$root" | head -5
+                docker logs pong-smoke || true
+                docker rm -f pong-smoke >/dev/null
+                exit 1
+              fi
+              # `|| true`: under `pipefail`, `head -1` closing the pipe early
+              # would fail the step on SIGPIPE rather than on a missing asset.
+              asset=$(printf '%s' "$root" | grep -o '/assets/[^"]*\.js' | head -1 || true)
+              if [ -z "$asset" ] || ! curl -fsS -o /dev/null "http://localhost:2567${asset}"; then
+                echo "::error::The shell's bundle (${asset:-none found}) is not being served."
+                docker rm -f pong-smoke >/dev/null
+                exit 1
+              fi
+              echo "Mini App served; bundle ${asset} reachable"
+
               docker rm -f pong-smoke >/dev/null
               exit 0
             fi
