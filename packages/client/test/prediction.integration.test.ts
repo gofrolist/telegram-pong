@@ -23,14 +23,11 @@
  * phones on mobile data is still the one that counts; see the README.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import type { ChildProcess } from 'node:child_process';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { Client } from '@colyseus/sdk';
-import { sign } from '@telegram-apps/init-data-node';
 import {
   BALL_MAX_SPEED,
   FIELD_W,
@@ -43,123 +40,34 @@ import {
 import { PongState } from '@pong/game-core/net';
 
 import { attachPrediction } from '../src/net/predictionAdapter.js';
+// The server spawn and its teardown live in the harness, shared with
+// `harness/bots.ts`. One copy, because getting the teardown wrong produces a
+// failure that looks nothing like its cause — see the note there.
+import {
+  authenticate as authenticateAt,
+  baseUrl,
+  openRoom as openRoomAt,
+  sleep,
+  startServer,
+  stopServer,
+  waitFor,
+} from '../harness/support.js';
 
-const BOT_TOKEN = '123456:TEST-BOT-TOKEN-FOR-UNIT-TESTS-ONLY';
 const PORT = 2601;
-const BASE = `http://localhost:${PORT}`;
+const BASE = baseUrl(PORT);
 
 /** One-way delay, so the round trip is 150ms. */
 const ONE_WAY_LATENCY_MS = 75;
 
+const authenticate = (userId: number, name: string) => authenticateAt(PORT, userId, name);
+const openRoom = (token: string) => openRoomAt(PORT, token);
+
 let server: ChildProcess | undefined;
 
-function startServer(): Promise<ChildProcess> {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const entry = resolve(here, '../../server/src/index.ts');
-
-  const child = spawn(process.execPath, ['--import', 'tsx', '--conditions=development', entry], {
-    // A process group of its own, so the whole tree can be torn down. See
-    // `stopServer` for why that matters.
-    detached: true,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      PORT: String(PORT),
-      TELEGRAM_BOT_TOKEN: BOT_TOKEN,
-      TELEGRAM_BOT_USERNAME: 'pong_test_bot',
-      TELEGRAM_APP_NAME: 'pong',
-      TELEGRAM_WEBHOOK_SECRET: 'webhook-secret-value-1234567890',
-      PUBLIC_SERVER_URL: BASE,
-      PUBLIC_CLIENT_URL: 'http://localhost:5173',
-      // Unreachable on purpose: a match must not depend on the database.
-      DATABASE_URL: 'postgresql://nobody:nobody@127.0.0.1:1/nowhere',
-      SESSION_SECRET: 'a-session-secret-of-at-least-32-characters',
-      // Colyseus' own transport-level delay, applied in both directions.
-      COLYSEUS_LATENCY: String(ONE_WAY_LATENCY_MS),
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-
-  return new Promise((resolvePromise, reject) => {
-    const timeout = setTimeout(() => reject(new Error('server did not start')), 45_000);
-    let output = '';
-    const onData = (chunk: Buffer) => {
-      output += chunk.toString();
-      if (output.includes('Listening on')) {
-        clearTimeout(timeout);
-        resolvePromise(child);
-      }
-    };
-    child.stdout?.on('data', onData);
-    child.stderr?.on('data', onData);
-    child.on('exit', (code) => {
-      clearTimeout(timeout);
-      reject(new Error(`server exited early (${code}):\n${output}`));
-    });
-  });
-}
-
-function initDataFor(userId: number, name: string): string {
-  return sign({ user: { id: userId, first_name: name, language_code: 'en' } }, BOT_TOKEN, new Date());
-}
-
-async function authenticate(userId: number, name: string): Promise<string> {
-  const response = await fetch(`${BASE}/api/auth`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ initData: initDataFor(userId, name) }),
-  });
-  const body = (await response.json()) as { token: string };
-  return body.token;
-}
-
-async function openRoom(token: string): Promise<string> {
-  const response = await fetch(`${BASE}/api/rooms`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ game: 'pong' }),
-  });
-  const body = (await response.json()) as { colyseusRoomId: string };
-  return body.colyseusRoomId;
-}
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-async function waitFor(label: string, predicate: () => boolean, timeoutMs = 25_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await sleep(25);
-  }
-  throw new Error(`timed out waiting for: ${label}`);
-}
-
 beforeAll(async () => {
-  server = await startServer();
+  server = await startServer({ port: PORT, oneWayLatencyMs: ONE_WAY_LATENCY_MS });
   await sleep(500);
 }, 60_000);
-
-/**
- * Tear the server down, whole process group and all.
- *
- * A plain `child.kill()` is not enough here, and getting it wrong is
- * expensive: `uWebSockets` binds with `SO_REUSEPORT`, so a survivor keeps
- * holding the port, the next run's server binds the SAME port alongside it,
- * and the kernel round-robins connections between them. A client then creates
- * a room over HTTP on one server and opens its WebSocket against the other,
- * which has never heard of that room — and the test hangs for reasons that
- * look nothing like the cause.
- */
-async function stopServer(child: ChildProcess | undefined): Promise<void> {
-  if (!child?.pid) return;
-  try {
-    // Negative pid = the whole process group, which `detached: true` created.
-    process.kill(-child.pid, 'SIGKILL');
-  } catch {
-    child.kill('SIGKILL');
-  }
-  await new Promise((r) => setTimeout(r, 300));
-}
 
 afterAll(async () => {
   await stopServer(server);
