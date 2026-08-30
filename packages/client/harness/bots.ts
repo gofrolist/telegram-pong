@@ -58,6 +58,7 @@ interface Options {
   paddle: PaddleMode;
   /** Correction easing window, ms. 0 uses the client's own constant. */
   smoothMs: number | undefined;
+  snap: number | undefined;
   port: number;
   out: string | null;
 }
@@ -104,6 +105,7 @@ function parseArgs(argv: string[]): Options {
     hostWaitSeconds: num('--host-wait', 3),
     paddle: (get('--paddle') ?? 'chase') as PaddleMode,
     smoothMs: get('--smooth') === undefined ? undefined : num('--smooth', 0),
+    snap: get('--snap') === undefined ? undefined : num('--snap', 0),
     port: num('--port', 2603),
     out: get('--out') ?? null,
   };
@@ -231,6 +233,7 @@ async function playOneMatch(port: number, options: Options, rttMs: number, seed:
     {
       hostWaitMs: options.hostWaitSeconds * 1000,
       smoothMs: options.smoothMs,
+      snap: options.snap,
     },
   );
 

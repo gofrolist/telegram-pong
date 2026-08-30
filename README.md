@@ -389,6 +389,37 @@ produced one. Two fixes were tried and measured, and both were reverted:
   ball being reliably jerky.
 - **Retuning the correction easing.** `smoothMs` 65 is already the optimum;
   0 (snap) and 200 (long ease) both measured worse on drawn-ball smoothness.
+- **A `snap` threshold** — the SDK's teleport cutoff, which pops a correction
+  bigger than N instead of easing it out, so a mispredicted reversal is one cut
+  rather than 65ms of the ball curving the wrong way. Swept off/8/15/100 over
+  ten 30s bot matches per arm (`bun run bots --snap N`). Two findings, and the
+  second is why it is not shipped:
+
+  *Small thresholds do nothing,* because the smoothed pose mixes position and
+  velocity fields and `snap` is all-or-nothing across them. A bounce corrects
+  `ball.vx` by 100-230 units/s, so a threshold of 8 or 15 is tripped by nearly
+  every reconcile and degenerates into `smoothMs: 0` — already known worse.
+  Measured: median wobble 0.0082 off, 0.0126 at 8, 0.0084 at 15, none of it
+  significant (Mann-Whitney |z| < 0.9). The SDK's sizing advice, "above
+  `maxSpeed x patch interval`", silently assumes a position-only pose.
+
+  *A threshold above the velocity noise floor helps at 174ms and hurts at
+  300ms.* At 100 the effect at 174ms is a variance collapse rather than a shift
+  — mean 0.0145 -> 0.0055, worst match 0.0465 -> 0.0068, four matches in ten
+  over 0.015 -> none (variance ratio F(9,9) = 142). But at 300ms the same
+  setting measured **4.5x worse**, 0.0109 -> 0.0488, with complete separation
+  between the arms (Mann-Whitney z = -3.36; the best snap match was worse than
+  the worst non-snap one). The reason is the trade itself: `snap` swaps a rare
+  smooth-but-wrong glide for a hard cut, and at 300ms mispredictions stop being
+  rare, so the ball pops constantly. A tuning that helps where the game is
+  already fine and hurts where it is not is backwards, so it stays off.
+
+  One caveat on the metric, since it flatters `snap`: wobble is sampled only in
+  open field, and the pop lands at the far paddle (outside the band) while the
+  glide's tail extends into it. The 174ms improvement is therefore an upper
+  bound, and whether the cut itself reads badly is a question for eyes, not for
+  this harness. `--snap` is wired through the harness so the sweep is
+  repeatable; production leaves it unset.
 
 What is left is a real trade against game feel — a wider, slower paddle moves the
 cliff from ~129ms RTT to 277ms and was measured 7-10x smoother at 300-414ms — and
