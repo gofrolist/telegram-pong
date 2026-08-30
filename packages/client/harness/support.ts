@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 import { Client } from '@colyseus/sdk';
 import { sign } from '@telegram-apps/init-data-node';
-import { SIDE_BOTTOM, SIDE_TOP, type Side } from '@pong/game-core';
+import { FIELD_W, SIDE_BOTTOM, SIDE_TOP, type Side } from '@pong/game-core';
 import { PongState } from '@pong/game-core/net';
 
 import { attachPrediction, type PredictionHandle } from '../src/net/predictionAdapter.js';
@@ -147,11 +147,30 @@ export interface Seat {
   prediction: PredictionHandle;
 }
 
+export interface SeatOptions {
+  /**
+   * How long the host sits alone on the waiting screen before the guest
+   * arrives, in milliseconds.
+   *
+   * NOT a detail. A host opens a room and waits for an invite to be tapped —
+   * seconds at best, minutes in practice — and their client is already
+   * running its frame loop and already sending an input every tick. Seating
+   * both players in the same millisecond, which is what this harness did
+   * originally, is the one arrangement in which that never happens, and it is
+   * why the harness scored a clean sweep on the exact match a player reported
+   * as unplayable. Default is a couple of seconds: long enough to be real,
+   * short enough to keep a sweep quick.
+   */
+  hostWaitMs?: number;
+}
+
 /** Two authenticated clients, seated in one room, both predicting. */
 export async function seatTwoPlayers(
   port: number,
   users: readonly [{ id: number; name: string }, { id: number; name: string }],
+  options: SeatOptions = {},
 ): Promise<[Seat, Seat]> {
+  const hostWaitMs = options.hostWaitMs ?? 2000;
   const [tokenA, tokenB] = await Promise.all([
     authenticate(port, users[0].id, users[0].name),
     authenticate(port, users[1].id, users[1].name),
@@ -164,6 +183,20 @@ export async function seatTwoPlayers(
   clientB.auth.token = tokenB;
 
   const roomA = await clientA.joinById<PongState>(roomId, { token: tokenA }, PongState);
+
+  // The host's wait, played out rather than skipped: prediction attached and a
+  // frame loop sending input, which is precisely what `MatchView` does from
+  // the moment it mounts on the waiting screen.
+  if (hostWaitMs > 0) {
+    const waitingPrediction = await attachPrediction(roomA, SIDE_BOTTOM);
+    const startedAt = performance.now();
+    while (performance.now() - startedAt < hostWaitMs) {
+      waitingPrediction.frame(FIELD_W / 2, performance.now());
+      await sleep(16);
+    }
+    waitingPrediction.dispose();
+  }
+
   const roomB = await clientB.joinById<PongState>(roomId, { token: tokenB }, PongState);
 
   // The seat is confirmed before the first state patch, so `players` is empty

@@ -32,6 +32,7 @@ const steady = (over: Partial<Record<string, number>> = {}) => () => ({
   driftEma: 0.5,
   driftPeak: 2,
   reconcileSeq: 0,
+  leadMs: 170,
   ...over,
 });
 
@@ -61,8 +62,8 @@ describe('NetcodeSampler', () => {
     const spiky = new NetcodeSampler();
     const end = run(spiky, 10, (frame) =>
       frame === 300
-        ? { pending: 5, correction: 40, driftEma: 0.1, driftPeak: 40, reconcileSeq: frame }
-        : { pending: 5, correction: 0.1, driftEma: 0.1, driftPeak: 0.2, reconcileSeq: frame },
+        ? { pending: 5, correction: 40, driftEma: 0.1, driftPeak: 40, reconcileSeq: frame, leadMs: 170 }
+        : { pending: 5, correction: 0.1, driftEma: 0.1, driftPeak: 0.2, reconcileSeq: frame, leadMs: 170 },
     );
     const summary = spiky.summarize(end)!;
 
@@ -78,11 +79,27 @@ describe('NetcodeSampler', () => {
       driftEma: 9,
       driftPeak: 10,
       reconcileSeq: frame,
+      leadMs: 170,
     }));
     const summary2 = diverging.summarize(end2)!;
 
     // Here the persistent component IS the story.
     expect(summary2.driftEmaMean).toBeGreaterThan(8);
+  });
+
+  it('reports the lead the player actually feels as score lag', () => {
+    // 69 unacked inputs at 30 Hz is what a real phone reported: the ball is
+    // drawn 2.3 seconds ahead of the score, which is not a subtle artifact.
+    const sampler = new NetcodeSampler();
+    const end = run(sampler, 10, steady({ leadMs: 69 * (1000 / 30) }));
+    const summary = sampler.summarize(end)!;
+
+    expect(summary.leadMsMean).toBeGreaterThan(2000);
+    expect(summary.leadMsP95).toBeGreaterThan(2000);
+
+    const healthy = new NetcodeSampler();
+    const end2 = run(healthy, 10, steady({ leadMs: 6 * (1000 / 30) }));
+    expect(healthy.summarize(end2)!.leadMsMean).toBeLessThan(250);
   });
 
   it('does not count a backgrounded app as a dropped frame', () => {

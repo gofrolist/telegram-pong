@@ -4,6 +4,8 @@
  *     bun run bots                       # the default latency sweep
  *     bun run bots --latency 0,75,150    # one-way ms, so RTT is twice each
  *     bun run bots --matches 2 --fps 60 --jitter 4 --out report.json
+ *     bun run bots --host-wait 30            # host waits 30s for the invite
+ *     bun run bots --paddle sweep            # measured bot moves flat out
  *
  * WHY THIS AND NOT THE INTEGRATION TEST. The test asserts that corrections
  * stay small, which is a claim about the SIMULATION agreeing with the server.
@@ -35,6 +37,7 @@ import {
   BALL_RADIUS,
   FIELD_H,
   FIELD_W,
+  PADDLE_HALF_W,
   PADDLE_INSET,
   Phase,
   SIDE_BOTTOM,
@@ -48,6 +51,10 @@ interface Options {
   fps: number;
   jitterMs: number;
   maxSeconds: number;
+  /** Seconds the host waits alone before the guest joins. See `SeatOptions`. */
+  hostWaitSeconds: number;
+  /** How the measured bot steers its paddle. See {@link steerBot}. */
+  paddle: PaddleMode;
   port: number;
   out: string | null;
 }
@@ -67,6 +74,10 @@ function parseArgs(argv: string[]): Options {
     // would hide exactly the bugs this is looking for.
     jitterMs: Number(get('--jitter') ?? 3),
     maxSeconds: Number(get('--seconds') ?? 45),
+    // A host is never joined instantly in real life, and the wait is what fills
+    // the server's input buffer. `--host-wait 0` restores the old behaviour.
+    hostWaitSeconds: Number(get('--host-wait') ?? 3),
+    paddle: (get('--paddle') ?? 'chase') as PaddleMode,
     port: Number(get('--port') ?? 2603),
     out: get('--out') ?? null,
   };
@@ -88,6 +99,46 @@ function inOpenField(x: number, y: number): boolean {
   return x > BAND.minX && x < BAND.maxX && y > BAND.minY && y < BAND.maxY;
 }
 
+/**
+ * How much the measured bot moves its paddle.
+ *
+ * A deliberate axis, not a preference. A player reported that *the more they
+ * moved their bat, the more the ball jumped* — so paddle motion has to be
+ * something the harness can turn up and down, or that claim cannot be
+ * reproduced or refuted. The mechanism it exercises: when the unacked queue
+ * outgrows the SDK's replay ring, the OLDEST unacked inputs age out and
+ * rollback skips them. Skipping an input is harmless when it says the same
+ * thing as its neighbours (a still paddle) and costs up to one tick of paddle
+ * travel when it does not, so a moving paddle turns a queue-length bug into a
+ * mispredicted bounce.
+ */
+type PaddleMode = 'chase' | 'still' | 'sweep';
+
+/** Where the measured bot wants its paddle this frame, in field units. */
+function steerBot(mode: PaddleMode, ballX: number, now: number): number {
+  switch (mode) {
+    // Parked in the middle. Every input carries the same target, so an input
+    // the reconciler drops is an input that did not matter.
+    case 'still':
+      return FIELD_W / 2;
+    // A new destination several times a second, ball or no ball: the upper
+    // bound on how wrong a stale input stream can be.
+    //
+    // APERIODIC on purpose. The first version of this was a 2s square wave,
+    // which aliased almost exactly against the 2.07s input delay it was meant
+    // to expose: the server's stale target kept landing one whole period back,
+    // i.e. on the same value, and the broken build scored BETTER than the
+    // fixed one. A periodic probe cannot measure a delay near its own period.
+    case 'sweep': {
+      const slot = Math.floor(now / 220);
+      const hash = Math.imul(slot ^ 0x9e3779b9, 0x85ebca6b) >>> 8;
+      return PADDLE_HALF_W + ((hash % 1000) / 1000) * (FIELD_W - 2 * PADDLE_HALF_W);
+    }
+    default:
+      return ballX;
+  }
+}
+
 interface MatchReport {
   latencyRttMs: number;
   seconds: number;
@@ -103,22 +154,49 @@ interface MatchReport {
   driftEmaMean: number;
   driftPeakMax: number;
   correctionMax: number;
+  /** How far ahead of confirmed server truth the drawn world ran, in ms. This
+   *  is the gap between watching the ball go past and the score changing. */
+  leadMsMean: number;
+  /**
+   * How far the server's idea of the measured bot's desired paddle X trails
+   * the one it last asked for, in FIELD UNITS (the field is 100 wide).
+   *
+   * The direct read on "the more I move my bat, the worse the ball behaves".
+   * The client predicts the bounce off the paddle it is drawing; the server
+   * bounces off the paddle its own input stream has reached. This is the gap
+   * between those two, and it is zero for a player who holds still no matter
+   * how far behind the input stream is — which is exactly why the complaint
+   * is phrased in terms of movement.
+   */
+  targetLagMean: number;
+  targetLagP95: number;
   pendingMean: number;
+  /** Worst unacked queue. Past the SDK's 64-entry replay ring, rollback
+   *  silently skips inputs and the prediction can no longer be correct — so
+   *  this is a pass/fail number, not a trend. */
+  pendingMax: number;
 }
 
 async function playOneMatch(port: number, options: Options, rttMs: number, seed: number): Promise<MatchReport> {
-  const [a, b] = await seatTwoPlayers(port, [
-    { id: 7000 + seed * 2, name: 'BotA' },
-    { id: 7001 + seed * 2, name: 'BotB' },
-  ]);
+  const [a, b] = await seatTwoPlayers(
+    port,
+    [
+      { id: 7000 + seed * 2, name: 'BotA' },
+      { id: 7001 + seed * 2, name: 'BotB' },
+    ],
+    { hostWaitMs: options.hostWaitSeconds * 1000 },
+  );
 
   await waitFor('match to leave WAITING', () => a.room.state.meta.phase !== Phase.WAITING);
 
   const wobble: number[] = [];
   const driftEma: number[] = [];
   const pending: number[] = [];
+  const leadMs: number[] = [];
+  const targetLag: number[] = [];
   let driftPeakMax = 0;
   let correctionMax = 0;
+  let pendingMax = 0;
   let frames = 0;
 
   const frameMs = 1000 / options.fps;
@@ -156,9 +234,11 @@ async function playOneMatch(port: number, options: Options, rttMs: number, seed:
     const dt = now - previousNow;
     if (dt <= 0) continue;
 
-    // Both bots chase the ball, so rallies actually build and the ball crosses
-    // paddle planes — the interesting case.
-    a.prediction.frame(a.room.state.ball.x, now);
+    // `b` always chases, so rallies build and the ball keeps crossing paddle
+    // planes — the interesting case. `a` is the one being measured, and how
+    // much it moves is the variable under test.
+    const wantedX = steerBot(options.paddle, a.room.state.ball.x, now);
+    a.prediction.frame(wantedX, now);
     b.prediction.frame(b.room.state.ball.x, now);
 
     const drawn = a.prediction.read();
@@ -174,6 +254,13 @@ async function playOneMatch(port: number, options: Options, rttMs: number, seed:
     if (a.room.state.meta.phase === Phase.PLAYING) {
       driftEma.push(stats.driftEma);
       pending.push(stats.pending);
+      leadMs.push(stats.leadMs);
+      // What the server currently believes this bot is asking for, against
+      // what it just asked for.
+      const serverTarget =
+        a.side === SIDE_BOTTOM ? a.room.state.bottom.targetX : a.room.state.top.targetX;
+      targetLag.push(Math.abs(wantedX - serverTarget));
+      if (stats.pending > pendingMax) pendingMax = stats.pending;
       if (stats.driftPeak > driftPeakMax) driftPeakMax = stats.driftPeak;
       if (stats.correction > correctionMax) correctionMax = stats.correction;
 
@@ -229,7 +316,11 @@ async function playOneMatch(port: number, options: Options, rttMs: number, seed:
     driftEmaMean: round(mean(driftEma)),
     driftPeakMax: round(driftPeakMax),
     correctionMax: round(correctionMax),
+    leadMsMean: round(mean(leadMs)),
+    targetLagMean: round(mean(targetLag)),
+    targetLagP95: round(p95(targetLag)),
     pendingMean: round(mean(pending)),
+    pendingMax,
   };
 
   for (const seat of [a, b] as Seat[]) {
@@ -272,7 +363,11 @@ async function main(): Promise<void> {
     'drift~'.padStart(7),
     'peak'.padStart(7),
     'corr max'.padStart(9),
+    'lead ms'.padStart(8),
+    'tgtlag~'.padStart(8),
+    'tgt p95'.padStart(8),
     'pending'.padStart(8),
+    'pend max'.padStart(9),
   ].join(' ');
   console.log(`\n${header}\n${'-'.repeat(header.length)}`);
   for (const r of reports) {
@@ -288,7 +383,11 @@ async function main(): Promise<void> {
         r.driftEmaMean.toFixed(3).padStart(7),
         r.driftPeakMax.toFixed(3).padStart(7),
         r.correctionMax.toFixed(3).padStart(9),
+        r.leadMsMean.toFixed(0).padStart(8),
+        r.targetLagMean.toFixed(1).padStart(8),
+        r.targetLagP95.toFixed(1).padStart(8),
         r.pendingMean.toFixed(2).padStart(8),
+        String(r.pendingMax).padStart(9),
       ].join(' '),
     );
   }

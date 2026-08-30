@@ -113,8 +113,9 @@ describe('prediction under 150ms RTT', () => {
       const targetA = roomA.state.ball.x;
       const targetB = roomB.state.ball.x;
 
-      // Drop roughly one input in twelve, to exercise the server's `idle: true`
-      // repeat-last-command path rather than letting the paddle stall.
+      // Drop roughly one input in twelve, so the server keeps hitting ticks
+      // with an empty buffer — the path where it must hold the last target
+      // rather than letting the paddle stall or snap.
       if (frames % 12 === 0) {
         droppedInputs++;
       } else {

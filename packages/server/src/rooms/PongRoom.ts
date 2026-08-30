@@ -16,6 +16,18 @@
  *     one shared-world step. Draining the buffer and applying only the newest
  *     would advance the reconcile ack past inputs the server never simulated,
  *     and the client would roll back to a state it can't reproduce.
+ *   - That consume runs on EVERY tick, in every phase, including WAITING and
+ *     PAUSED. It is the client's ack clock, not just a gameplay step: a tick
+ *     that consumes nothing acks nothing, so a phase that skips the consume
+ *     lets the client's unacked queue grow until the 64-slot buffer overflows.
+ *     Past that the ack advances only by dropping the oldest input, which
+ *     pins the queue at the buffer size for the rest of the match — longer
+ *     than the client's own 64-entry replay ring, so its oldest unacked inputs
+ *     age out and are silently skipped on every rollback. The prediction then
+ *     cannot reconstruct server truth at all, and the ball visibly teleports
+ *     on every reconcile. A host sits in WAITING for as long as the invite
+ *     takes to be answered, so this was the *normal* path for whoever opened
+ *     the room.
  */
 
 import { Room, type Client } from '@colyseus/core';
@@ -109,14 +121,20 @@ export class PongRoom extends Room<PongRoomType> {
    * by the simulation — the first line of the anti-cheat, applied by the
    * framework rather than by us remembering to call it.
    *
-   * `idle: true` repeats the previous input when a packet is lost, which on
-   * mobile data is the difference between a paddle that holds its course and
-   * a paddle that stutters to a halt every time a datagram is dropped.
+   * NO `idle` policy, deliberately. `idle: true` does not repeat the previous
+   * input — it synthesizes a frame of schema ZERO values, so every tick that
+   * found an empty buffer (ordinary mobile jitter) set `targetX = 0` and slid
+   * the paddle towards the left wall at the full speed cap. The client, which
+   * predicts with the target it actually sent, cannot reproduce that, and the
+   * paddle they disagree about is the one the ball bounces off.
+   *
+   * Holding the previous target is what we wanted, and it needs no policy at
+   * all: `targetX` is state, so a tick that consumes nothing simply leaves it
+   * where the last real input put it. See {@link fixedStep}.
    */
   inputs = this.defineInput(PongInput, {
     bufferMaxSize: 64,
     sanitize: { targetX: [0, FIELD_W] },
-    idle: true,
   });
 
   private options!: PongRoomCreateOptions;
@@ -390,16 +408,21 @@ export class PongRoom extends Room<PongRoomType> {
   private fixedStep(dt: number): void {
     const world = this.world();
 
-    if (this.state.meta.phase === Phase.PLAYING || this.state.meta.phase === Phase.COUNTDOWN) {
-      // Consume exactly one input per player per step. See the class comment.
-      for (const [sessionId, side] of this.sideBySession) {
-        const command = this.inputs.get(sessionId).next();
-        if (!command) continue;
-        const paddle = side === SIDE_BOTTOM ? this.state.bottom : this.state.top;
-        // `sanitize` already clamped this to the field; `applyInput` inside
-        // game-core clamps again to the *paddle* range, which is narrower.
-        paddle.targetX = command.targetX;
-      }
+    // Consume exactly one input per player per step, in EVERY phase — see the
+    // class comment for why the buffer must never be left unattended.
+    //
+    // A tick that consumes nothing also acks nothing, and holding the target
+    // is free: `targetX` is state, so leaving it alone IS repeating the last
+    // command. Movement is gated inside `step`, which advances no paddle while
+    // the room is waiting or paused, so applying a target here is safe in
+    // every phase and the paddle is already lined up when play resumes.
+    for (const [sessionId, side] of this.sideBySession) {
+      const command = this.inputs.get(sessionId).next();
+      if (!command) continue;
+      const paddle = side === SIDE_BOTTOM ? this.state.bottom : this.state.top;
+      // `sanitize` already clamped this to the field; `applyInput` inside
+      // game-core clamps again to the *paddle* range, which is narrower.
+      paddle.targetX = command.targetX;
     }
 
     const rallyBefore = this.state.meta.rallyHits;
