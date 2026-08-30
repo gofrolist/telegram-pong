@@ -216,7 +216,12 @@ export function setLanguage(language: string | null) {
 
 /** Report one of the funnel steps only the client can see. */
 export function reportEvent(
-  name: 'share_message_sent' | 'share_message_failed' | 'rematch_tapped' | 'invite_shared',
+  name:
+    | 'share_message_sent'
+    | 'share_message_failed'
+    | 'rematch_tapped'
+    | 'invite_shared'
+    | 'netcode_sample',
   props: Record<string, unknown> = {},
 ): void {
   // Fire-and-forget: instrumentation must never block or fail a user action.

@@ -26,6 +26,14 @@ export const AnalyticsEvent = {
   SHARE_MESSAGE_SENT: 'share_message_sent',
   SHARE_MESSAGE_FAILED: 'share_message_failed',
   REMATCH_TAPPED: 'rematch_tapped',
+  /**
+   * One netcode summary per player per match, emitted when the match ends.
+   *
+   * Not a log line and deliberately not one row per frame: 30 Hz of rows per
+   * player would cost more to store than the match is worth and still be read
+   * as an aggregate. The client keeps bounded samples and sends percentiles.
+   */
+  NETCODE_SAMPLE: 'netcode_sample',
 } as const;
 
 export type AnalyticsEventName = (typeof AnalyticsEvent)[keyof typeof AnalyticsEvent];
