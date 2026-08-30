@@ -22,7 +22,8 @@
     "inviteFriend": "Invite a friend",
     "inviteSending": "Opening…",
     "inviteFailed": "Couldn't open the share sheet. Copy the link instead.",
-    "copyFailed": "Copying isn't allowed here — press and hold the link above."
+    "copyFailed": "Copying isn't allowed here — press and hold the link above.",
+    "netcodeDebugOn": "Netcode overlay on. Tap the title 5x to hide."
   },
   "match": {
     "connecting": "Connecting…",
