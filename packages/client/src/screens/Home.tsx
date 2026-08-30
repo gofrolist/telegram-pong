@@ -6,11 +6,12 @@
  * product's whole loop starts with a link being shared.
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import * as api from '../api.js';
 import { formatNumber, formatPercent } from '../i18n/index.js';
+import { isNetcodeDebugEnabled, loadNetcodeOverlay, setNetcodeDebug } from '../debug/netcode.js';
 
 interface Props {
   language: string;
@@ -23,6 +24,32 @@ export function Home({ language, profile, chatLeaderboard, onRoomOpened }: Props
   const { t } = useTranslation();
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [debugOn, setDebugOn] = useState(isNetcodeDebugEnabled);
+
+  /**
+   * Five taps on the title toggles the netcode overlay.
+   *
+   * A gesture rather than a setting, because there is nowhere to put a
+   * setting: inside Telegram the URL is fixed by BotFather, so a query
+   * parameter is not reachable, and a visible switch would be a developer
+   * control shipped to every player. Five is high enough that nobody reaches
+   * it by fidgeting and low enough to do one-handed while reporting a bug.
+   */
+  const taps = useRef<{ count: number; last: number }>({ count: 0, last: 0 });
+  const tapTitle = useCallback(() => {
+    const now = Date.now();
+    // Taps more than a second apart are two separate intentions, not a gesture.
+    taps.current = now - taps.current.last > 1000
+      ? { count: 1, last: now }
+      : { count: taps.current.count + 1, last: now };
+
+    if (taps.current.count < 5) return;
+    taps.current = { count: 0, last: 0 };
+
+    const next = setNetcodeDebug(!isNetcodeDebugEnabled());
+    setDebugOn(next);
+    if (next) void loadNetcodeOverlay();
+  }, []);
   const startMatch = useCallback(async () => {
     setCreating(true);
     setError(null);
@@ -45,8 +72,12 @@ export function Home({ language, profile, chatLeaderboard, onRoomOpened }: Props
   return (
     <div className="screen">
       <header className="screen__header">
-        <h1 className="screen__title">{t('app.title')}</h1>
+        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+        <h1 className="screen__title" onClick={tapTitle}>
+          {t('app.title')}
+        </h1>
         <p className="screen__tagline">{t('home.tagline')}</p>
+        {debugOn && <p className="screen__tagline">{t('home.netcodeDebugOn')}</p>}
       </header>
 
       <button type="button" className="button button--primary" onClick={() => void startMatch()} disabled={creating}>

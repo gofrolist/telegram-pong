@@ -21,6 +21,7 @@ import * as api from '../api.js';
 import { attachPrediction, type PredictionHandle } from '../net/predictionAdapter.js';
 import type { PongRoomHandle } from '../net/client.js';
 import { canSharePreparedMessage, sharePreparedMessage } from '../telegram.js';
+import { loadNetcodeOverlay } from '../debug/netcode.js';
 import { draw, pointerToFieldX, resizeCanvas, type Theme, type Viewport } from './renderer.js';
 
 export interface MatchOutcome {
@@ -119,6 +120,12 @@ export function MatchView({
     }, 2000);
 
     const state = room.state as PongState;
+
+    // No-op unless the overlay was switched on. Loading it here rather than at
+    // startup means it is fetched at the moment there is finally something for
+    // it to show, and the SDK replays what publishers emitted before it
+    // installed — so arriving after the room joined costs nothing.
+    void loadNetcodeOverlay();
 
     // Attaching waits for the first decoded state patch, so the render loop
     // starts before prediction is live and simply draws the replicated
