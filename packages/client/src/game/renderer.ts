@@ -77,8 +77,9 @@ export interface Viewport {
  */
 const THUMB_RESERVE_PX = 56;
 /**
- * Never leave the top paddle closer than this to the top of the canvas — it
- * shares that corner with the leave button.
+ * Never leave the top of the FIELD closer than this to the top of the canvas —
+ * that corner is shared with the leave button, and the top paddle sits a fixed
+ * `TOP_PLANE_Y * scale` below this line.
  */
 const MIN_TOP_GAP_PX = 8;
 
@@ -192,6 +193,11 @@ function drawPaddleArc(
     base + PADDLE_ARC_HALF_ANGLE,
   );
   context.stroke();
+  // Put the cap back. `lineCap` is context state, not path state, and the only
+  // other stroke in this file is the dashed centre line — which is drawn at the
+  // TOP of the next frame, so a round cap left behind here would fatten every
+  // dash by half a line width from the second frame onwards.
+  context.lineCap = 'butt';
 }
 
 export function draw(

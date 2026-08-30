@@ -199,8 +199,14 @@ function bounceOffPaddle(world: PongWorld, paddle: PaddleLike, arcCy: number): v
     // the arc's centre, well behind the face. Guarded anyway: a zero here
     // would divide a NaN into the velocity and there is no recovering a world
     // once the ball's direction is NaN.
+    //
+    // The fallback is read off the ARC, not off the ball: a zero length means
+    // `ball.y === arcCy`, so any comparison between the two is decided by that
+    // equality rather than by which paddle this is. The arc's centre always
+    // sits on the goal side of its own paddle, so the field's centre is the
+    // direction the ball has to leave in.
     dx = 0;
-    dy = arcCy > ball.y ? -1 : 1;
+    dy = arcCy > FIELD_H / 2 ? -1 : 1;
   }
 
   // Keep a floor under the vertical component so a rally cannot degenerate
