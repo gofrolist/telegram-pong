@@ -310,6 +310,8 @@ export function MatchView({
   }, [inviteUrl, t]);
 
   const paused = phase === Phase.PAUSED;
+  /** Whether this Telegram can show the picker, and we have a room to invite to. */
+  const canPick = Boolean(inviteRoomCode) && canSharePreparedMessage();
 
   return (
     <div className="match">
@@ -349,12 +351,11 @@ export function MatchView({
           <div className="match__overlay-text">{t('home.waitingHint')}</div>
           {inviteUrl && (
             <>
-              {/* The picker first, the link second: picking a chat is the
-                  thing the host is actually trying to do. The link stays
-                  visible as the escape hatch for a Telegram too old to have
-                  `shareMessage`, and for anyone who wants to paste it
-                  somewhere else entirely. */}
-              {inviteRoomCode && canSharePreparedMessage() && (
+              {/* One button, because there is one thing to do here: pick who
+                  you are playing. A URL on screen is not an action — it is
+                  something the host would have to get out of the app by hand,
+                  which is the problem the picker exists to solve. */}
+              {canPick && (
                 <button
                   type="button"
                   className="button button--primary"
@@ -364,10 +365,20 @@ export function MatchView({
                   {inviteSending ? t('home.inviteSending') : t('home.inviteFriend')}
                 </button>
               )}
-              <code className="card__link">{inviteUrl}</code>
-              <button type="button" className="button" onClick={() => void copyInvite()}>
-                {inviteCopied ? t('home.copied') : t('home.copyLink')}
-              </button>
+
+              {/* The link appears only when it is the only way left: a
+                  Telegram too old for `shareMessage`, or a picker that just
+                  failed. Showing it before then is clutter; showing it after
+                  is the difference between a dead end and a way out. */}
+              {(!canPick || inviteError) && (
+                <>
+                  <code className="card__link">{inviteUrl}</code>
+                  <button type="button" className="button" onClick={() => void copyInvite()}>
+                    {inviteCopied ? t('home.copied') : t('home.copyLink')}
+                  </button>
+                </>
+              )}
+
               {inviteError && <p className="error">{inviteError}</p>}
             </>
           )}
