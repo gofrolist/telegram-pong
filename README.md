@@ -173,6 +173,32 @@ bun run dev:client
 > so it never shows the cold-start latency that shaped `db/client.ts`. A green
 > local run tells you nothing about the first query after an idle night.
 
+### Two bots, and a number for "it feels laggy"
+
+```sh
+bun run --filter @pong/client bots                     # 0 / 150 / 300ms RTT
+bun run --filter @pong/client bots --latency 150 --matches 3 --out report.json
+```
+
+Spawns a real server, seats two headless clients that chase the ball, and
+plays. The headline column is **wobble**: the frame-to-frame change in the
+*drawn* ball's velocity while it is in open field, as a fraction of its own
+speed. In open field the ball travels in a straight line by definition, so any
+change there is an artifact of how it was drawn, and a perfect render scores
+zero.
+
+That metric exists because the integration test cannot express the complaint
+that produced it. The test asserts that *corrections* stay small — a claim
+about the simulation agreeing with the server — and a ball can satisfy it
+completely while still looking wrong, because what a player sees is not the
+simulation but the interpolated read of it.
+
+**Check the instrument before believing it.** The first version of this
+harness accumulated its frame clock instead of anchoring it to wall time,
+which drifted 0.33ms per frame against the patch stream and produced a
+convincing 21% p95 wobble that was entirely its own. Anchored, the same run
+reports 0.0000.
+
 ### Testing the netcode honestly
 
 ```sh

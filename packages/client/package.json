@@ -9,7 +9,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "bots": "node --import tsx --conditions=development harness/bots.ts"
   },
   "dependencies": {
     "@colyseus/sdk": "0.18.2",
