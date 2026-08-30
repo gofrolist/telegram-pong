@@ -35,6 +35,7 @@ import type { ChildProcess } from 'node:child_process';
 
 import {
   BALL_RADIUS,
+  BALL_START_SPEED,
   FIELD_H,
   FIELD_W,
   PADDLE_HALF_W,
@@ -55,6 +56,8 @@ interface Options {
   hostWaitSeconds: number;
   /** How the measured bot steers its paddle. See {@link steerBot}. */
   paddle: PaddleMode;
+  /** Correction easing window, ms. 0 uses the client's own constant. */
+  smoothMs: number | undefined;
   port: number;
   out: string | null;
 }
@@ -62,23 +65,46 @@ interface Options {
 function parseArgs(argv: string[]): Options {
   const get = (flag: string): string | undefined => {
     const index = argv.indexOf(flag);
-    return index === -1 ? undefined : argv[index + 1];
+    if (index === -1) return undefined;
+    const value = argv[index + 1];
+    // A flag whose value is missing silently takes the NEXT FLAG as its value,
+    // and `Number('--port')` is NaN — which then propagates into the smoothing
+    // window, out through every position the reconciler draws, and lands in
+    // the report as a column of zeros that reads exactly like a perfect run.
+    // Refuse instead. This harness has now produced three separate misleading
+    // results from unvalidated inputs; the pattern is the point.
+    if (value === undefined || value.startsWith('--')) {
+      throw new Error(`${flag} needs a value`);
+    }
+    return value;
+  };
+  const num = (flag: string, fallback: number): number => {
+    const raw = get(flag);
+    if (raw === undefined) return fallback;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) throw new Error(`${flag} needs a number, got "${raw}"`);
+    return parsed;
   };
   return {
     // One-way delays. 0 is a sanity floor — anything wrong at 0ms is wrong in
     // the code, not in the network.
-    latencies: (get('--latency') ?? '0,75,150').split(',').map((value) => Number(value.trim())),
-    matches: Number(get('--matches') ?? 1),
-    fps: Number(get('--fps') ?? 60),
+    latencies: (get('--latency') ?? '0,75,150').split(',').map((value) => {
+      const parsed = Number(value.trim());
+      if (!Number.isFinite(parsed)) throw new Error(`--latency needs numbers, got "${value}"`);
+      return parsed;
+    }),
+    matches: num('--matches', 1),
+    fps: num('--fps', 60),
     // Real frames are not evenly spaced. Feeding a perfectly regular clock
     // would hide exactly the bugs this is looking for.
-    jitterMs: Number(get('--jitter') ?? 3),
-    maxSeconds: Number(get('--seconds') ?? 45),
+    jitterMs: num('--jitter', 3),
+    maxSeconds: num('--seconds', 45),
     // A host is never joined instantly in real life, and the wait is what fills
     // the server's input buffer. `--host-wait 0` restores the old behaviour.
-    hostWaitSeconds: Number(get('--host-wait') ?? 3),
+    hostWaitSeconds: num('--host-wait', 3),
     paddle: (get('--paddle') ?? 'chase') as PaddleMode,
-    port: Number(get('--port') ?? 2603),
+    smoothMs: get('--smooth') === undefined ? undefined : num('--smooth', 0),
+    port: num('--port', 2603),
     out: get('--out') ?? null,
   };
 }
@@ -154,6 +180,24 @@ interface MatchReport {
   driftEmaMean: number;
   driftPeakMax: number;
   correctionMax: number;
+  /** Correction split by what it was ON. `oppPaddle` is nonzero by design;
+   *  `selfPaddle` must stay ~0; `ballPos`/`ballVel` are what the player sees. */
+  ballCorrP95: number;
+  ballCorrMax: number;
+  ballVelCorrMax: number;
+  selfPaddleCorrMax: number;
+  oppPaddleCorrMax: number;
+  /**
+   * Where the ball was when a bounce was mispredicted badly enough to reverse
+   * it (a velocity correction over half the start speed).
+   *
+   * The whole question, since the own-paddle correction is flat zero: a
+   * reversal near the FAR plane is the opponent's paddle, whose inputs this
+   * client cannot know; one near the NEAR plane would be a bug, because that
+   * bounce depends only on our own paddle and the incoming ball.
+   */
+  reversalsFarHalf: number;
+  reversalsNearHalf: number;
   /** How far ahead of confirmed server truth the drawn world ran, in ms. This
    *  is the gap between watching the ball go past and the score changing. */
   leadMsMean: number;
@@ -184,7 +228,10 @@ async function playOneMatch(port: number, options: Options, rttMs: number, seed:
       { id: 7000 + seed * 2, name: 'BotA' },
       { id: 7001 + seed * 2, name: 'BotB' },
     ],
-    { hostWaitMs: options.hostWaitSeconds * 1000 },
+    {
+      hostWaitMs: options.hostWaitSeconds * 1000,
+      smoothMs: options.smoothMs,
+    },
   );
 
   await waitFor('match to leave WAITING', () => a.room.state.meta.phase !== Phase.WAITING);
@@ -197,6 +244,13 @@ async function playOneMatch(port: number, options: Options, rttMs: number, seed:
   let driftPeakMax = 0;
   let correctionMax = 0;
   let pendingMax = 0;
+  const ballCorr: number[] = [];
+  let ballCorrMax = 0;
+  let ballVelCorrMax = 0;
+  let selfPaddleCorrMax = 0;
+  let oppPaddleCorrMax = 0;
+  let reversalsFarHalf = 0;
+  let reversalsNearHalf = 0;
   let frames = 0;
 
   const frameMs = 1000 / options.fps;
@@ -261,6 +315,17 @@ async function playOneMatch(port: number, options: Options, rttMs: number, seed:
         a.side === SIDE_BOTTOM ? a.room.state.bottom.targetX : a.room.state.top.targetX;
       targetLag.push(Math.abs(wantedX - serverTarget));
       if (stats.pending > pendingMax) pendingMax = stats.pending;
+      ballCorr.push(stats.ballCorrection);
+      if (stats.ballCorrection > ballCorrMax) ballCorrMax = stats.ballCorrection;
+      if (stats.ballVelCorrection > ballVelCorrMax) ballVelCorrMax = stats.ballVelCorrection;
+      if (stats.selfPaddleCorrection > selfPaddleCorrMax) selfPaddleCorrMax = stats.selfPaddleCorrection;
+      if (stats.oppPaddleCorrection > oppPaddleCorrMax) oppPaddleCorrMax = stats.oppPaddleCorrection;
+      // Attribute each reversal to a half of the field. `a` defends the
+      // bottom, so the far plane is the top one.
+      if (stats.ballVelCorrection > BALL_START_SPEED / 2) {
+        if (a.room.state.ball.y < FIELD_H / 2) reversalsFarHalf++;
+        else reversalsNearHalf++;
+      }
       if (stats.driftPeak > driftPeakMax) driftPeakMax = stats.driftPeak;
       if (stats.correction > correctionMax) correctionMax = stats.correction;
 
@@ -316,6 +381,13 @@ async function playOneMatch(port: number, options: Options, rttMs: number, seed:
     driftEmaMean: round(mean(driftEma)),
     driftPeakMax: round(driftPeakMax),
     correctionMax: round(correctionMax),
+    ballCorrP95: round(p95(ballCorr)),
+    ballCorrMax: round(ballCorrMax),
+    ballVelCorrMax: round(ballVelCorrMax),
+    selfPaddleCorrMax: round(selfPaddleCorrMax),
+    oppPaddleCorrMax: round(oppPaddleCorrMax),
+    reversalsFarHalf,
+    reversalsNearHalf,
     leadMsMean: round(mean(leadMs)),
     targetLagMean: round(mean(targetLag)),
     targetLagP95: round(p95(targetLag)),
@@ -362,7 +434,13 @@ async function main(): Promise<void> {
     'wob max'.padStart(8),
     'drift~'.padStart(7),
     'peak'.padStart(7),
-    'corr max'.padStart(9),
+    'ballC p95'.padStart(10),
+    'ballC max'.padStart(10),
+    'ballV max'.padStart(10),
+    'selfP max'.padStart(10),
+    ' oppP max'.padStart(10),
+    'rev far'.padStart(8),
+    'rev near'.padStart(9),
     'lead ms'.padStart(8),
     'tgtlag~'.padStart(8),
     'tgt p95'.padStart(8),
@@ -382,7 +460,13 @@ async function main(): Promise<void> {
         r.wobbleMax.toFixed(4).padStart(8),
         r.driftEmaMean.toFixed(3).padStart(7),
         r.driftPeakMax.toFixed(3).padStart(7),
-        r.correctionMax.toFixed(3).padStart(9),
+        r.ballCorrP95.toFixed(3).padStart(10),
+        r.ballCorrMax.toFixed(2).padStart(10),
+        r.ballVelCorrMax.toFixed(2).padStart(10),
+        r.selfPaddleCorrMax.toFixed(3).padStart(10),
+        r.oppPaddleCorrMax.toFixed(2).padStart(10),
+        String(r.reversalsFarHalf).padStart(8),
+        String(r.reversalsNearHalf).padStart(9),
         r.leadMsMean.toFixed(0).padStart(8),
         r.targetLagMean.toFixed(1).padStart(8),
         r.targetLagP95.toFixed(1).padStart(8),

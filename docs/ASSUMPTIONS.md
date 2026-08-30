@@ -295,6 +295,13 @@ installs; without `fontconfig` and a font the card's text renders blank.
   group chats, and a deployed page; it cannot be run from here. The probe is
   built (`?debug=initdata`) and the matrix is written. Chat leaderboards ship
   disabled.
+- **The opponent's paddle is not predictable, and the ball's bounce off it is
+  therefore a guess.** Their paddle crosses its own contact zone in 68ms of
+  one-way latency, so past ~137ms RTT this client cannot know whether the ball
+  is coming back. Measured clean to 174ms RTT and broken by 300ms. Two fixes
+  were tried and measured worse; see the README. The remaining lever is the
+  paddle's size and speed, which is a game-design decision and has not been
+  taken.
 - **Packet loss is simulated at the sender**, by skipping `input.send()` on
   ~8% of frames. That exercises the server's empty-tick path but is not the
   same as losing datagrams in flight, and `COLYSEUS_LATENCY` is a fixed delay

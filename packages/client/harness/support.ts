@@ -162,6 +162,8 @@ export interface SeatOptions {
    * short enough to keep a sweep quick.
    */
   hostWaitMs?: number;
+  /** Correction easing window, in ms. Defaults to the client's own constant. */
+  smoothMs?: number;
 }
 
 /** Two authenticated clients, seated in one room, both predicting. */
@@ -188,7 +190,9 @@ export async function seatTwoPlayers(
   // frame loop sending input, which is precisely what `MatchView` does from
   // the moment it mounts on the waiting screen.
   if (hostWaitMs > 0) {
-    const waitingPrediction = await attachPrediction(roomA, SIDE_BOTTOM);
+    const waitingPrediction = await attachPrediction(roomA, SIDE_BOTTOM, {
+      smoothMs: options.smoothMs,
+    });
     const startedAt = performance.now();
     while (performance.now() - startedAt < hostWaitMs) {
       waitingPrediction.frame(FIELD_W / 2, performance.now());
@@ -209,9 +213,10 @@ export async function seatTwoPlayers(
   const sideA = roomA.state.players.get(roomA.sessionId)!.side === SIDE_TOP ? SIDE_TOP : SIDE_BOTTOM;
   const sideB = roomB.state.players.get(roomB.sessionId)!.side === SIDE_TOP ? SIDE_TOP : SIDE_BOTTOM;
 
+  const tuning = { smoothMs: options.smoothMs };
   const [predictionA, predictionB] = await Promise.all([
-    attachPrediction(roomA, sideA),
-    attachPrediction(roomB, sideB),
+    attachPrediction(roomA, sideA, tuning),
+    attachPrediction(roomB, sideB, tuning),
   ]);
 
   return [

@@ -85,6 +85,36 @@ export const SERVE_DIRS: ReadonlyArray<readonly [number, number]> = [
   [0.5, 0.8660254037844386],
 ];
 
+/**
+ * How long a reconciliation correction is spread over, in ms.
+ *
+ * A correction is a disagreement the client has to absorb; this decides
+ * whether it is absorbed as a jump or as a glide. Roughly two ticks was chosen
+ * when the only corrections were small ones. It is a constant here, rather
+ * than a literal at the call site, because the far-plane hold changes what a
+ * correction IS: with it, the ball's release from the opponent's paddle is a
+ * correction on every rally, always forwards, and easing that out is the
+ * difference between the ball setting off and the ball being teleported off.
+ */
+export const PREDICTION_SMOOTH_MS = 65;
+
+/**
+ * Rolling prediction drift, in field units, above which the client says so.
+ *
+ * Passed as the SDK's `warnOnDivergence`, and setting it at all is what makes
+ * drift and correction get COMPUTED — the SDK skips the bookkeeping entirely
+ * when no tolerance is set and its debug bundle is not loaded, which had the
+ * end-of-match report sending a hard-coded zero home from every device whose
+ * owner had not switched the overlay on.
+ *
+ * The value is above the drift the opponent's paddle contributes on its own.
+ * That component is not a bug and not fixable here — their inputs are not
+ * knowable on this client, so their paddle can only be carried forward from
+ * its last replicated target — and warning about it would train everyone to
+ * ignore the warning.
+ */
+export const DIVERGENCE_TOLERANCE = 3;
+
 /** Inbound inputs accepted per second before excess is silently dropped. */
 export const INPUT_RATE_LIMIT_PER_SEC = 45;
 
