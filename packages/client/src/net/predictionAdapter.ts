@@ -8,8 +8,9 @@
  * than a change scattered across every component that draws a ball.
  *
  * What the adapter provides, and nothing more:
- *   - `frame(desiredX)`, called once per animation frame: stages and sends the
- *     inputs due this frame, and advances the reconciler.
+ *   - `frame(desiredX, now)`, called once per animation frame with rAF's own
+ *     timestamp: stages and sends the inputs due this frame, and advances the
+ *     reconciler.
  *   - `read()`, a smoothed snapshot for the renderer.
  *
  * What it deliberately does NOT do: clock synchronisation, a snapshot buffer,
@@ -65,8 +66,11 @@ export interface PredictionHandle {
    * *desire*: the shared simulation moves the paddle towards it under the
    * speed cap, identically here and on the server, so an honest client sees
    * no correction at all.
+   *
+   * `now` MUST be the timestamp `requestAnimationFrame` passed its callback,
+   * not a reading taken inside it — see the note on `predict.tick` below.
    */
-  frame(desiredTargetX: number): void;
+  frame(desiredTargetX: number, now: number): void;
   /** Smoothed positions for this frame. Safe to call after `frame`. */
   read(): RenderSnapshot;
   /** Diagnostics for the netcode HUD. */
@@ -135,12 +139,19 @@ export async function attachPrediction(room: PongRoom, mySide: Side): Promise<Pr
   });
 
   return {
-    frame(desiredTargetX: number): void {
+    frame(desiredTargetX: number, now: number): void {
       const target = sanitizeTargetX(desiredTargetX);
 
       // How many fixed input steps are due this frame. On a 120 Hz phone this
       // is usually 0 and occasionally 1; on a stuttering one it may be 2 or 3.
-      const steps = predict.tick();
+      //
+      // `now` is the rAF timestamp, and passing it is not optional. Omitted,
+      // it defaults to `performance.now()` read inside the callback, which folds JS
+      // scheduling jitter into the frame dt: the render interpolation then
+      // advances unevenly and the ball reads as drifting off a straight line
+      // rather than stuttering outright. The rAF timestamp is vsync-aligned
+      // and evenly spaced, which is exactly what the interpolation assumes.
+      const steps = predict.tick(now);
       for (let i = 0; i < steps; i++) {
         input.data.targetX = target;
         input.send();

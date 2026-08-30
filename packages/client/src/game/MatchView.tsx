@@ -138,14 +138,18 @@ export function MatchView({
         console.warn('[match] prediction unavailable, falling back to replicated state', error);
       });
 
-    const loop = () => {
+    const loop = (now: number) => {
       if (!running) return;
       frameHandle = requestAnimationFrame(loop);
 
       // Send input and advance the reconciler. Even while paused: the adapter
       // needs a tick to keep its clock aligned, and the shared simulation
       // freezes itself when the phase says so.
-      prediction?.frame(desiredXRef.current);
+      //
+      // `now` is rAF's own timestamp, passed straight through. Sampling the
+      // clock inside this callback instead would hand the interpolation a
+      // jittery dt and put a visible wobble on the ball.
+      prediction?.frame(desiredXRef.current, now);
 
       // Until prediction is attached, draw the replicated state directly. It
       // is a fraction of a second on join, and a still countdown screen.
