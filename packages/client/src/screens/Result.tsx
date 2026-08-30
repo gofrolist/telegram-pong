@@ -14,7 +14,7 @@ import { EndReason } from '@pong/game-core';
 
 import * as api from '../api.js';
 import { formatNumber } from '../i18n/index.js';
-import { shareResultCard } from '../telegram.js';
+import { sharePreparedMessage } from '../telegram.js';
 import type { MatchOutcome } from '../game/MatchView.js';
 
 interface Props {
@@ -47,7 +47,7 @@ export function Result({ outcome, language, onRematch, onHome }: Props) {
       // A fresh prepared-message id on every tap: the id is single-use, and a
       // cached one gives the user a picker that silently does nothing.
       const prepared = await api.prepareShare(outcome.matchId);
-      const sent = await shareResultCard(prepared.id);
+      const sent = await sharePreparedMessage(prepared.id);
       api.reportEvent(sent ? 'share_message_sent' : 'share_message_failed', {
         matchId: outcome.matchId,
       });

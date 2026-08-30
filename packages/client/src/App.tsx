@@ -29,7 +29,13 @@ type Screen =
   | { kind: 'failed'; message: string }
   | { kind: 'home' }
   | { kind: 'joining' }
-  | { kind: 'match'; room: PongRoomHandle; side: Side; inviteUrl: string | null }
+  | {
+      kind: 'match';
+      room: PongRoomHandle;
+      side: Side;
+      inviteUrl: string | null;
+      inviteRoomCode: string | null;
+    }
   | { kind: 'result'; outcome: MatchOutcome };
 
 /** How long to wait for our own `PlayerInfo` to decode before giving up. */
@@ -92,7 +98,11 @@ export function App() {
   const roomRef = useRef<PongRoomHandle | null>(null);
 
   const enterRoom = useCallback(
-    async (colyseusRoomId: string, token: string, inviteUrl?: string | null) => {
+    async (
+      colyseusRoomId: string,
+      token: string,
+      invite?: { url: string | null; roomCode: string } | null,
+    ) => {
       setScreen({ kind: 'joining' });
       try {
         // Joining another room means the previous connection is finished with;
@@ -114,7 +124,13 @@ export function App() {
         // the bottom player. See the same hazard in `predictionAdapter.ts`.
         const side = await waitForMySide(room);
 
-        setScreen({ kind: 'match', room, side, inviteUrl: inviteUrl ?? null });
+        setScreen({
+          kind: 'match',
+          room,
+          side,
+          inviteUrl: invite?.url ?? null,
+          inviteRoomCode: invite?.roomCode ?? null,
+        });
       } catch {
         // `i18next.t` rather than the hook's `t`: the hook's identity changes
         // when i18n finishes initialising, and depending on it here would make
@@ -237,7 +253,10 @@ export function App() {
       // The invite link travels with us into the match: the host lands
       // straight on the waiting screen, and that screen is the only place they
       // can still get at the link they need to share.
-      void enterRoom(room.colyseusRoomId, auth.token, room.inviteUrl);
+      void enterRoom(room.colyseusRoomId, auth.token, {
+        url: room.inviteUrl,
+        roomCode: room.roomCode,
+      });
     },
     [auth, enterRoom],
   );
@@ -277,6 +296,7 @@ export function App() {
           room={screen.room}
           mySide={screen.side}
           inviteUrl={screen.inviteUrl}
+          inviteRoomCode={screen.inviteRoomCode}
           onFinished={handleFinished}
           onLeave={handleLeave}
         />

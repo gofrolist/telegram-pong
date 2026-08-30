@@ -36,7 +36,7 @@ import {
   getProfileStats,
   listHeadToHead,
 } from './stats.js';
-import { prepareShare } from '../share/prepared.js';
+import { prepareInvite, prepareShare } from '../share/prepared.js';
 import { db } from '../db/client.js';
 import { users } from '../db/schema.js';
 import { eq, inArray } from 'drizzle-orm';
@@ -428,6 +428,61 @@ export function mountApi(app: Application): void {
       }
 
       res.json({ available: true, rows: await getChatLeaderboard(session.ci, game) });
+    }),
+  );
+
+  /**
+   * Prepare a single-use invite for Telegram's own chat picker.
+   *
+   * The clipboard is not a viable primary path here: `navigator.clipboard` is
+   * unavailable or permission-denied inside Telegram's webview on iOS, where
+   * a "copy link" button looks like it worked and did nothing. This gives the
+   * Mini App something to hand `shareMessage()`, which opens Telegram's native
+   * chat list over the running app — the room stays open underneath and
+   * nothing has to be pasted.
+   *
+   * The room code is re-encoded here rather than taken from the client, so an
+   * invite can only ever point at a room this caller actually hosts.
+   */
+  api.post(
+    '/invite/:roomCode',
+    requireSession,
+    handler(async (req, res) => {
+      const session = req.session!;
+      const roomCode = String(req.params.roomCode);
+
+      const room = await resolveRoom(roomCode);
+      if (!room) {
+        res.status(404).json({ error: 'room_not_found' });
+        return;
+      }
+      if (room.hostUserId !== session.uid) {
+        res.status(403).json({ error: 'not_the_host' });
+        return;
+      }
+
+      const prepared = await prepareInvite({
+        userId: session.uid,
+        userName: session.n,
+        languageCode: session.l,
+        startParam: encodeInvite({ game: room.game, room: room.roomCode, ref: session.uid }),
+      });
+
+      if (!prepared) {
+        // The link is still on screen, so this is a degraded share rather than
+        // a dead end — say so with a status the client can retry on.
+        res.status(502).json({ error: 'share_unavailable' });
+        return;
+      }
+
+      void recordEvent({
+        name: 'share_tapped',
+        userId: session.uid,
+        chatInstance: session.ci,
+        game: room.game,
+      });
+
+      res.json(prepared);
     }),
   );
 

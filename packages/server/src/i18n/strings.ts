@@ -24,6 +24,11 @@ interface Dictionary {
   opponentWaitingButton: string;
   rematchButton: string;
   playButton: string;
+  /** Title of the invite in Telegram's share picker. */
+  inviteTitle: string;
+  /** Body of the invite message the recipient receives. */
+  inviteText: (name: string) => string;
+  inviteButton: string;
   cardCaption: (winner: string, loser: string, scoreWinner: number, scoreLoser: number) => string;
   help: string;
   unknownCommand: string;
@@ -37,6 +42,10 @@ const en: Dictionary = {
   opponentWaitingButton: 'Join the match',
   rematchButton: 'Rematch',
   playButton: 'Play',
+  inviteTitle: 'Pong — first to tap plays',
+  inviteText: (name) =>
+    `${name} wants to play Pong. Two players, one ball, no bots — whoever taps first is the opponent.`,
+  inviteButton: 'Play',
   cardCaption: (winner, loser, scoreWinner, scoreLoser) =>
     `${winner} ${scoreWinner}–${scoreLoser} ${loser}`,
   help: 'Tap Play to open the game. Share an invite link into a chat and the first person to tap it becomes your opponent.',
@@ -51,6 +60,10 @@ const ru: Dictionary = {
   opponentWaitingButton: 'Войти в матч',
   rematchButton: 'Реванш',
   playButton: 'Играть',
+  inviteTitle: 'Понг — играет тот, кто нажмёт первым',
+  inviteText: (name) =>
+    `${name} зовёт сыграть в понг. Двое игроков, один мяч, никаких ботов — соперником станет тот, кто нажмёт первым.`,
+  inviteButton: 'Играть',
   cardCaption: (winner, loser, scoreWinner, scoreLoser) =>
     `${winner} ${scoreWinner}–${scoreLoser} ${loser}`,
   help: 'Нажмите «Играть», чтобы открыть игру. Отправьте ссылку-приглашение в чат — соперником станет тот, кто нажмёт первым.',

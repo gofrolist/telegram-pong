@@ -194,6 +194,19 @@ export function prepareShare(matchId: string) {
   });
 }
 
+/**
+ * Prepare an invite for Telegram's chat picker.
+ *
+ * Single-use like `prepareShare`, and called on every tap for the same
+ * reason. `roomCode`, not the invite URL: the server re-encodes the link so an
+ * invite can only point at a room this user hosts.
+ */
+export function prepareInvite(roomCode: string) {
+  return request<PreparedShareResponse>(`/api/invite/${encodeURIComponent(roomCode)}`, {
+    method: 'POST',
+  });
+}
+
 export function setLanguage(language: string | null) {
   return request<{ ok: true }>('/api/language', {
     method: 'POST',

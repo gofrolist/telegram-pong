@@ -73,6 +73,69 @@ export async function ensureCardFileId(
   return uploadAndCache(matchId, userId, png);
 }
 
+export interface PrepareInviteInput {
+  /** The user who tapped invite — a prepared message is bound to one user. */
+  userId: number;
+  /** Their display name, which the invite message names as the challenger. */
+  userName: string;
+  languageCode: string | null | undefined;
+  /** The room the invite opens. */
+  startParam: string;
+}
+
+/**
+ * Prepare a single-use invite for Telegram's own chat picker.
+ *
+ * This is what makes "invite a friend" a picker rather than a clipboard. The
+ * Mini App calls `shareMessage(id)` with what this returns and Telegram shows
+ * its native chat list *over* the app — the game keeps running underneath,
+ * the room stays open, and nothing has to be pasted anywhere.
+ *
+ * An `article`, not a `photo`: unlike the result card there is nothing to
+ * render, and a text result costs no upload and no round trip to the Bot API
+ * to cache a `file_id`.
+ *
+ * Returns `null` rather than throwing — a failed invite should fall back to
+ * the link on screen, not replace the waiting room with an error.
+ */
+export async function prepareInvite(input: PrepareInviteInput): Promise<PreparedShare | null> {
+  const strings = t(input.languageCode);
+  const url = `https://t.me/${config.TELEGRAM_BOT_USERNAME}/${config.TELEGRAM_APP_NAME}?startapp=${input.startParam}`;
+
+  try {
+    const prepared = await bot.api.savePreparedInlineMessage(
+      input.userId,
+      {
+        type: 'article',
+        // Single-use and scoped to this user, so the room code is identity
+        // enough; it also keeps the id stable for one room's retries.
+        id: input.startParam.slice(0, 64),
+        title: strings.inviteTitle,
+        description: strings.inviteText(input.userName),
+        input_message_content: {
+          message_text: strings.inviteText(input.userName),
+        },
+        reply_markup: {
+          inline_keyboard: [[{ text: strings.inviteButton, url }]],
+        },
+      },
+      {
+        // Anywhere an opponent might be. Bot chats are excluded for the same
+        // reason as the result card: the other side would never tap it.
+        allow_user_chats: true,
+        allow_bot_chats: false,
+        allow_group_chats: true,
+        allow_channel_chats: true,
+      },
+    );
+
+    return { id: prepared.id, expirationDate: prepared.expiration_date };
+  } catch (error) {
+    console.error('[share] savePreparedInlineMessage failed for invite:', error);
+    return null;
+  }
+}
+
 export interface PrepareShareInput {
   matchId: string;
   /** The user who tapped share — prepared messages are bound to one user. */
