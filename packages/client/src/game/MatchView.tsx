@@ -20,6 +20,7 @@ import type { PongState } from '@pong/game-core/net';
 import * as api from '../api.js';
 import { attachPrediction, type PredictionHandle } from '../net/predictionAdapter.js';
 import type { PongRoomHandle } from '../net/client.js';
+import { canSharePreparedMessage, sharePreparedMessage } from '../telegram.js';
 import { draw, pointerToFieldX, resizeCanvas, type Theme, type Viewport } from './renderer.js';
 
 export interface MatchOutcome {
@@ -37,10 +38,12 @@ interface Props {
   mySide: Side;
   /**
    * Set only for the host who just opened this room. The waiting screen is the
-   * one place they can still reach the link they have to share, so it has to
+   * one place they can still reach the invite they have to send, so it has to
    * travel with them rather than staying behind on the home screen.
    */
   inviteUrl?: string | null;
+  /** The room the invite opens; the server re-encodes the link from it. */
+  inviteRoomCode?: string | null;
   onFinished(outcome: MatchOutcome): void;
   onLeave(): void;
 }
@@ -64,7 +67,14 @@ function readTheme(): Theme {
   };
 }
 
-export function MatchView({ room, mySide, inviteUrl, onFinished, onLeave }: Props) {
+export function MatchView({
+  room,
+  mySide,
+  inviteUrl,
+  inviteRoomCode,
+  onFinished,
+  onLeave,
+}: Props) {
   const { t } = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   /**
@@ -78,6 +88,8 @@ export function MatchView({ room, mySide, inviteUrl, onFinished, onLeave }: Prop
   const [opponentConnected, setOpponentConnected] = useState(true);
   const [selfConnected, setSelfConnected] = useState(true);
   const [inviteCopied, setInviteCopied] = useState(false);
+  const [inviteSending, setInviteSending] = useState(false);
+  const [inviteError, setInviteError] = useState<string | null>(null);
 
   const mirrored = mySide === SIDE_TOP;
 
@@ -244,20 +256,62 @@ export function MatchView({ room, mySide, inviteUrl, onFinished, onLeave }: Prop
     [mirrored],
   );
 
+  /**
+   * Send the invite through Telegram's own chat picker.
+   *
+   * The primary path, because it is the one that answers the actual question —
+   * *who* are you playing — without leaving the app. Telegram draws its chat
+   * list over the Mini App; the room stays open underneath, so a host who
+   * changes their mind is still sitting in it.
+   *
+   * The prepared-message id is single-use, so one is minted per tap.
+   */
+  const sendInvite = useCallback(async () => {
+    if (!inviteRoomCode) return;
+    setInviteSending(true);
+    setInviteError(null);
+    try {
+      const prepared = await api.prepareInvite(inviteRoomCode);
+      const sent = await sharePreparedMessage(prepared.id);
+      // `sent === false` is mostly the user closing the picker, which is not
+      // an error worth shouting about — but it is worth measuring.
+      api.reportEvent(sent ? 'invite_shared' : 'share_message_failed', {
+        props: { method: 'picker' },
+      });
+      if (!sent) setInviteError(null);
+    } catch {
+      api.reportEvent('share_message_failed', { props: { method: 'picker' } });
+      setInviteError(t('home.inviteFailed'));
+    } finally {
+      setInviteSending(false);
+    }
+  }, [inviteRoomCode, t]);
+
+  /**
+   * The fallback, and only the fallback.
+   *
+   * `navigator.clipboard` is unavailable or permission-denied inside
+   * Telegram's webview on iOS, where this silently did nothing and left a
+   * button that looked like it had worked. A failure now says so and points at
+   * the link, which is selectable on screen.
+   */
   const copyInvite = useCallback(async () => {
     if (!inviteUrl) return;
+    setInviteError(null);
     try {
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard_unavailable');
       await navigator.clipboard.writeText(inviteUrl);
       setInviteCopied(true);
       api.reportEvent('invite_shared', { props: { method: 'copy' } });
       window.setTimeout(() => setInviteCopied(false), 2000);
     } catch {
-      // Clipboard permission can be denied inside the webview; the link is
-      // rendered on screen either way.
+      setInviteError(t('home.copyFailed'));
     }
-  }, [inviteUrl]);
+  }, [inviteUrl, t]);
 
   const paused = phase === Phase.PAUSED;
+  /** Whether this Telegram can show the picker, and we have a room to invite to. */
+  const canPick = Boolean(inviteRoomCode) && canSharePreparedMessage();
 
   return (
     <div className="match">
@@ -297,10 +351,35 @@ export function MatchView({ room, mySide, inviteUrl, onFinished, onLeave }: Prop
           <div className="match__overlay-text">{t('home.waitingHint')}</div>
           {inviteUrl && (
             <>
-              <code className="card__link">{inviteUrl}</code>
-              <button type="button" className="button button--primary" onClick={() => void copyInvite()}>
-                {inviteCopied ? t('home.copied') : t('home.copyLink')}
-              </button>
+              {/* One button, because there is one thing to do here: pick who
+                  you are playing. A URL on screen is not an action — it is
+                  something the host would have to get out of the app by hand,
+                  which is the problem the picker exists to solve. */}
+              {canPick && (
+                <button
+                  type="button"
+                  className="button button--primary"
+                  disabled={inviteSending}
+                  onClick={() => void sendInvite()}
+                >
+                  {inviteSending ? t('home.inviteSending') : t('home.inviteFriend')}
+                </button>
+              )}
+
+              {/* The link appears only when it is the only way left: a
+                  Telegram too old for `shareMessage`, or a picker that just
+                  failed. Showing it before then is clutter; showing it after
+                  is the difference between a dead end and a way out. */}
+              {(!canPick || inviteError) && (
+                <>
+                  <code className="card__link">{inviteUrl}</code>
+                  <button type="button" className="button" onClick={() => void copyInvite()}>
+                    {inviteCopied ? t('home.copied') : t('home.copyLink')}
+                  </button>
+                </>
+              )}
+
+              {inviteError && <p className="error">{inviteError}</p>}
             </>
           )}
         </div>

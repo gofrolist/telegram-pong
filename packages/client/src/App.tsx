@@ -29,7 +29,13 @@ type Screen =
   | { kind: 'failed'; message: string }
   | { kind: 'home' }
   | { kind: 'joining' }
-  | { kind: 'match'; room: PongRoomHandle; side: Side; inviteUrl: string | null }
+  | {
+      kind: 'match';
+      room: PongRoomHandle;
+      side: Side;
+      inviteUrl: string | null;
+      inviteRoomCode: string | null;
+    }
   | { kind: 'result'; outcome: MatchOutcome };
 
 /** How long to wait for our own `PlayerInfo` to decode before giving up. */
@@ -92,7 +98,11 @@ export function App() {
   const roomRef = useRef<PongRoomHandle | null>(null);
 
   const enterRoom = useCallback(
-    async (colyseusRoomId: string, token: string, inviteUrl?: string | null) => {
+    async (
+      colyseusRoomId: string,
+      token: string,
+      invite?: { url: string | null; roomCode: string } | null,
+    ) => {
       setScreen({ kind: 'joining' });
       try {
         // Joining another room means the previous connection is finished with;
@@ -114,7 +124,13 @@ export function App() {
         // the bottom player. See the same hazard in `predictionAdapter.ts`.
         const side = await waitForMySide(room);
 
-        setScreen({ kind: 'match', room, side, inviteUrl: inviteUrl ?? null });
+        setScreen({
+          kind: 'match',
+          room,
+          side,
+          inviteUrl: invite?.url ?? null,
+          inviteRoomCode: invite?.roomCode ?? null,
+        });
       } catch {
         // `i18next.t` rather than the hook's `t`: the hook's identity changes
         // when i18n finishes initialising, and depending on it here would make
@@ -130,6 +146,22 @@ export function App() {
     let cancelled = false;
 
     void (async () => {
+      try {
+        await boot();
+      } catch (error) {
+        // The launch path must not be able to fail silently. Anything thrown
+        // here — an SDK that cannot reach its host, a launch Telegram did not
+        // sign, a network that vanished mid-exchange — used to reject this
+        // promise with nobody listening, leaving the app on its loading screen
+        // forever: no error, no log, nothing to report. A visible failure is
+        // worth more than a hang.
+        console.error('[boot] launch failed:', error);
+        await initI18n(null, null).catch(() => {});
+        if (!cancelled) setScreen({ kind: 'failed', message: i18next.t('app.error') });
+      }
+    })();
+
+    async function boot(): Promise<void> {
       const env = await initTelegram();
       if (cancelled) return;
       setEnvironment(env);
@@ -180,7 +212,7 @@ export function App() {
       }
 
       if (!cancelled) setScreen({ kind: 'home' });
-    })();
+    }
 
     return () => {
       cancelled = true;
@@ -221,7 +253,10 @@ export function App() {
       // The invite link travels with us into the match: the host lands
       // straight on the waiting screen, and that screen is the only place they
       // can still get at the link they need to share.
-      void enterRoom(room.colyseusRoomId, auth.token, room.inviteUrl);
+      void enterRoom(room.colyseusRoomId, auth.token, {
+        url: room.inviteUrl,
+        roomCode: room.roomCode,
+      });
     },
     [auth, enterRoom],
   );
@@ -232,7 +267,12 @@ export function App() {
 
   switch (screen.kind) {
     case 'booting':
-      return <div className="screen screen--centered">{t('app.loading')}</div>;
+      // Deliberately not translated. This screen is on screen *before* i18n is
+      // initialised — initialisation needs the language the auth exchange
+      // returns — so `t` here is react-i18next's not-ready stub and would
+      // render the literal key `app.loading` at the user. An ellipsis says the
+      // same thing in every language.
+      return <div className="screen screen--centered">…</div>;
 
     case 'outside-telegram':
       return <div className="screen screen--centered">{t('app.openInTelegram')}</div>;
@@ -256,6 +296,7 @@ export function App() {
           room={screen.room}
           mySide={screen.side}
           inviteUrl={screen.inviteUrl}
+          inviteRoomCode={screen.inviteRoomCode}
           onFinished={handleFinished}
           onLeave={handleLeave}
         />

@@ -2,7 +2,7 @@
  * User records and referral attribution.
  */
 
-import { and, eq, gte, sql } from 'drizzle-orm';
+import { eq, lt, sql } from 'drizzle-orm';
 
 import { config } from './config.js';
 import { db, tryWrite } from './db/client.js';
@@ -110,12 +110,10 @@ export async function consumeRoomCreationBudget(userId: number): Promise<boolean
 export async function pruneRoomCreationCounters(): Promise<void> {
   const cutoff = new Date(Date.now() - 3 * 3_600_000);
   await tryWrite('pruneRoomCreationCounters', () =>
-    db.delete(roomCreationCounters).where(
-      and(
-        // `gte` on the negated condition keeps the index usable.
-        sql`${roomCreationCounters.windowStart} < ${cutoff}`,
-        gte(roomCreationCounters.count, 0),
-      ),
-    ),
+    // `lt` rather than a raw `sql` fragment: only the column-aware operators
+    // run the column's driver encoder, and the driver rejects a bare `Date`.
+    db
+      .delete(roomCreationCounters)
+      .where(lt(roomCreationCounters.windowStart, cutoff)),
   );
 }

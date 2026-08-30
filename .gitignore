@@ -1,6 +1,8 @@
 node_modules/
 dist/
 build/
+# The client bundle, copied in by the Dockerfile at image build time.
+packages/server/public/
 .env
 .env.local
 *.log

@@ -20,7 +20,7 @@ module in `game-core`, a new Room class, and a new React component.
 packages/
   game-core/   deterministic simulation, types, constants  (no dependencies)
     src/net/   the replicated Colyseus schemas             (@pong/game-core/net)
-  server/      Colyseus rooms, bot, HTTP API
+  server/      Colyseus rooms, bot, HTTP API, and the built Mini App
   client/      React Mini App
 tools/
   cheat-detection/   nightly offline batch job (Python)
@@ -65,7 +65,8 @@ database and no Telegram credentials.
    Keep the token; it is what signs `initData`, so it is the root of all auth.
 2. **Create the Mini App.** `/newapp`, select the bot. The **short name** you
    choose becomes `TELEGRAM_APP_NAME` and appears in every invite link as
-   `t.me/<bot>/<app>`. Set the Web App URL to your Vercel deployment.
+   `t.me/<bot>/<app>`. Set the Web App URL to the **server's** own origin
+   (`https://<app>.fly.dev/`) — one deployment serves the app and the socket.
 3. **Set the menu button** (optional): `/mybots` → your bot → *Bot Settings* →
    *Menu Button* → the same URL.
 4. **Enable inline mode** — `/setinline`. **Required** for
@@ -94,7 +95,7 @@ than surfacing as a failed auth an hour later.
 | `TELEGRAM_APP_NAME` | The Mini App short name from `/newapp`. |
 | `TELEGRAM_WEBHOOK_SECRET` | ≥16 chars. Echoed by Telegram in `X-Telegram-Bot-Api-Secret-Token`. |
 | `PUBLIC_SERVER_URL` | This server's public HTTPS origin. |
-| `PUBLIC_CLIENT_URL` | The Mini App origin, for the CORS allowlist. |
+| `PUBLIC_CLIENT_URL` | **Optional.** Defaults to `PUBLIC_SERVER_URL`, which is right whenever the server serves the app. Set it only for a client on a different origin — Vite's dev server, or a tunnel. |
 | `DATABASE_URL` | Neon **pooled** string (`-pooler` in the host). |
 | `MIGRATION_DATABASE_URL` | Neon **direct** string. Migrations only. |
 | `SESSION_SECRET` | ≥32 chars. Distinct from the bot token. |
@@ -148,6 +149,10 @@ cloudflared tunnel --url http://localhost:2567     # the game server + webhook
 Then set `PUBLIC_CLIENT_URL` and `PUBLIC_SERVER_URL` to the tunnel URLs, point
 the BotFather Web App URL at the client tunnel, and restart the server so it
 re-registers the webhook. `ngrok` works identically.
+
+`PUBLIC_CLIENT_URL` matters here and only here: locally the app is on Vite and
+the server is somewhere else, which is the one arrangement that needs the CORS
+allowlist to know a second origin. In production it is left unset.
 
 ### The stack
 
@@ -203,7 +208,6 @@ fly launch --no-deploy          # fly.toml is already written
 fly secrets set \
   TELEGRAM_BOT_TOKEN=... TELEGRAM_BOT_USERNAME=... TELEGRAM_APP_NAME=pong \
   TELEGRAM_WEBHOOK_SECRET=... PUBLIC_SERVER_URL=https://<app>.fly.dev \
-  PUBLIC_CLIENT_URL=https://<app>.vercel.app \
   DATABASE_URL=... SESSION_SECRET=...
 fly deploy
 ```
@@ -213,21 +217,37 @@ fly deploy
 if fly stops it, every open invite and every live match dies with it — and an
 invite tapped an hour later has to still be there.
 
-### Vercel
+### The Mini App
 
-Point Vercel at `packages/client` (`vercel.json` handles the monorepo build)
-and set `VITE_SERVER_URL` to the fly URL.
+There is no second deployment. The Dockerfile builds `packages/client` and
+copies the bundle into the image, and the server serves it from `/` — the same
+origin as `/api` and the WebSocket.
 
-`vercel.json` sets `no-cache` on `index.html` and `immutable` on the hashed
-assets. Telegram's webview caches aggressively enough that without this pairing
-a deploy can stay invisible for hours.
+That is a deliberate trade. A CDN would win the first paint, but every rally is
+bound to the fly region regardless, so the CDN would win the one request that
+matters least while every `/api` call paid a cross-origin preflight to
+Frankfurt. Same-origin also removes the CORS allowlist as a thing that can be
+misconfigured, and makes the client and the server one versioned artifact:
+there is no window in which a cached client talks to a server whose API moved.
+
+`packages/server/src/http/staticClient.ts` owns what a static host would
+otherwise configure — `no-cache` on `index.html`, `immutable` on the hashed
+assets under `/assets/`, and `frame-ancestors` limited to telegram.org.
+Telegram's webview caches aggressively enough that without that first pairing a
+deploy can stay invisible for hours.
+
+The build bakes in no server hostname: with `VITE_SERVER_URL` unset the client
+calls `window.location.origin`, so the image is not tied to the domain it is
+served from. Setting `VITE_SERVER_URL` at build time still points it elsewhere,
+which is what `bun run dev:client` does.
 
 ### CI
 
 `.github/workflows/ci.yml` runs on every pull request and every push to `main`:
 typecheck, the three test suites (one runner per package — the integration
 tests assert against wall clock and go flaky when they share two cores), the
-full build, and a Docker build that boots the image and curls `/healthz`. The
+full build, and a Docker build that boots the image, curls `/healthz`, and
+checks that `/` serves the Mini App shell with a reachable bundle. The
 aggregate job is named `CI`; point branch protection at that one.
 
 ### Shipping to fly
