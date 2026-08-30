@@ -153,10 +153,12 @@ is the property the brief actually wanted.
 | Field | 100 × 180 units | Portrait, ≈9:16.2. Paddles top and bottom. |
 | Match length | First to 7, no win-by-2 | Short matches produce more rematches, and rematch is the retention mechanic. |
 | Paddle speed cap | 190 units/s | Fast enough to cross the field in ~0.4s; slow enough that positioning is a skill. |
-| Ball | 62 → 132 units/s, ×1.045 per hit | A rally accelerates but stays trackable. |
+| Ball | 62 → 115 units/s, ×1.07 per hit | The ramp has to be spendable inside one rally, since the speed resets on every serve. ×1.045 reached its ceiling on hit 18, i.e. never. This pair is faster at every hit count a real rally reaches and tops out on hit 10. The ceiling came *down* as the ramp got steeper: top speed is what the far-paddle prediction pays for — see the table on `BALL_MAX_SPEED`. |
 | Serve | Toward the player who just **scored** | The player who conceded gets the breather. |
 | Countdown | 1s between points, 3s at match start, 2s after a reconnect | A returning player needs the same beat to find their paddle that a serve gives them. |
-| Bounce | Angle skewed by contact offset (`BOUNCE_SKEW = 0.85`) | Centre hit returns straight; edge hit cuts. Pure reflection would make it a game of nothing. |
+| Paddle face | A convex arc of radius 17, not a flat bar | The return angle is the surface normal where the ball touched, so it can be read off the curve on screen instead of learned. |
+| Bounce | Along that normal; the incoming direction is discarded | Centre hit returns straight; edge hit cuts, up to `asin(11/17)` ≈ 40°. A true reflection would make the return a function of two things the player tracks separately. Pure reflection with a flat bar would make it a game of nothing. |
+| Paddle inset | 18 units from the field edge | Thumb clearance, not geometry: the paddle is steered by a finger resting on top of it. The renderer also spends the letterbox below the field on the same problem, which costs the simulation nothing. |
 
 Determinism constraints that shaped these: the tick uses only `+ - * /`,
 comparison, `Math.sqrt` and `Math.imul`. No `Math.sin`/`cos`/`pow`/`atan2` —
@@ -165,9 +167,12 @@ JavaScriptCore in Telegram's iOS webview. Serve directions are a precomputed
 unit-vector table for the same reason.
 
 Collision is **swept, not discrete**: at 30 Hz and top speed the ball covers
-more than twice the paddle thickness per tick, so an overlap test would let it
-tunnel through a paddle. Covered by a test that rallies for 30 000 ticks
-against two perfect trackers and asserts nobody ever scores.
+more than the paddle's thickness per tick, so an overlap test would let it
+tunnel through a paddle. Against the curved face that is a segment-versus-circle
+intersection — one quadratic, and `Math.sqrt` is the one irrational operation
+IEEE-754 pins down exactly, so it survives the determinism rule above. Covered
+by a test that rallies for 30 000 ticks against two perfect trackers and asserts
+nobody ever scores.
 
 ## Product decisions
 

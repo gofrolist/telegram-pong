@@ -15,6 +15,8 @@ import {
   BOTTOM_PLANE_Y,
   FIELD_H,
   FIELD_W,
+  PADDLE_ARC_R,
+  PADDLE_BULGE,
   PADDLE_HALF_W,
   PADDLE_THICKNESS,
   TOP_PLANE_Y,
@@ -59,12 +61,41 @@ export interface Viewport {
   cssHeight: number;
 }
 
+/**
+ * CSS pixels of leftover height to hand to the thumb instead of splitting it
+ * evenly above and below the field.
+ *
+ * The field is 100x180 and almost every phone is taller than that, so a
+ * centred field leaves a band of dead pixels at each end. Below the field that
+ * band is the most valuable space on the screen — it is where the hand steering
+ * the bottom paddle can rest without covering it — and above the field it is
+ * worth nothing. Roughly the contact patch of a thumb.
+ *
+ * This is why the fix is here and not in the simulation: moving the paddle up
+ * by moving PADDLE_INSET shortens the rally for both players and is replicated
+ * to everyone, whereas letterbox is per-device slack that is being thrown away.
+ */
+const THUMB_RESERVE_PX = 56;
+/**
+ * Never leave the top paddle closer than this to the top of the canvas — it
+ * shares that corner with the leave button.
+ */
+const MIN_TOP_GAP_PX = 8;
+
 export function computeViewport(cssWidth: number, cssHeight: number): Viewport {
   const scale = Math.min(cssWidth / FIELD_W, cssHeight / FIELD_H);
+
+  // Give the thumb up to THUMB_RESERVE_PX of the letterbox, without crowding
+  // the top paddle and without ever pushing the field BELOW centre — on a
+  // window tall enough that half the slack already clears the reserve, the
+  // honest layout is the centred one.
+  const slack = cssHeight - FIELD_H * scale;
+  const offsetY = Math.min(slack / 2, Math.max(MIN_TOP_GAP_PX, slack - THUMB_RESERVE_PX));
+
   return {
     scale,
     offsetX: (cssWidth - FIELD_W * scale) / 2,
-    offsetY: (cssHeight - FIELD_H * scale) / 2,
+    offsetY,
     cssWidth,
     cssHeight,
   };
@@ -105,35 +136,62 @@ export function pointerToFieldX(clientX: number, canvas: HTMLCanvasElement, mirr
 }
 
 /**
- * A filled rounded rectangle, without depending on `CanvasRenderingContext2D
- * .roundRect`.
+ * Half-angle the paddle's face subtends at the centre of its arc.
  *
- * `roundRect` is Safari 16+, and Telegram's webview on iOS 15 does not have
- * it. Calling a missing method here throws inside `requestAnimationFrame`,
- * which does not merely lose the paddles — it kills the render loop, so the
- * field goes blank and stays blank for the whole match.
+ * Renderer-only trigonometry, which is why it is here and not in the
+ * simulation: `Math.asin` is implementation-defined and a single call to it
+ * inside a tick would be enough to desync the server from an iOS webview. The
+ * drawing is free to use it because nothing downstream of a pixel is replayed.
  */
-function roundedRect(
+const PADDLE_ARC_HALF_ANGLE = Math.asin(PADDLE_HALF_W / PADDLE_ARC_R);
+
+/**
+ * Y of the centre of the circle each paddle's face is cut from, in field
+ * units. Mirrors the simulation's own derivation — the point of drawing the
+ * arc at all is that it is *the* contact surface, so if these two ever drift
+ * apart the ball starts bouncing off nothing.
+ */
+const BOTTOM_ARC_CY = BOTTOM_PLANE_Y - PADDLE_BULGE + PADDLE_ARC_R;
+const TOP_ARC_CY = TOP_PLANE_Y + PADDLE_BULGE - PADDLE_ARC_R;
+
+/**
+ * Draw one paddle as the arc the ball actually bounces off.
+ *
+ * Stroked rather than filled, at `PADDLE_ARC_R - PADDLE_THICKNESS / 2`: a
+ * stroke straddles its path, so pulling the path in by half the line width
+ * puts the *outer* edge of the drawn bar exactly on the contact radius. The
+ * player aiming at the visible surface is aiming at the real one.
+ *
+ * `arc` with a round `lineCap`, not `roundRect` — which is Safari 16+ and
+ * missing from Telegram's webview on iOS 15, where calling it throws inside
+ * `requestAnimationFrame` and takes the whole render loop down with it, so the
+ * field goes blank and stays blank for the rest of the match.
+ *
+ * `faceUp` is about the screen, not the field: the local player's paddle is
+ * always the one at the bottom of their own screen, and its face always bulges
+ * towards the middle, so the mirror flips which way each arc curves.
+ */
+function drawPaddleArc(
   context: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  radius: number,
+  centreX: number,
+  centreY: number,
+  scale: number,
+  faceUp: boolean,
 ): void {
+  const radius = (PADDLE_ARC_R - PADDLE_THICKNESS / 2) * scale;
+  const base = faceUp ? -Math.PI / 2 : Math.PI / 2;
+
+  context.lineWidth = PADDLE_THICKNESS * scale;
+  context.lineCap = 'round';
   context.beginPath();
-  if (typeof context.roundRect === 'function') {
-    context.roundRect(x, y, width, height, radius);
-  } else {
-    const r = Math.min(radius, width / 2, height / 2);
-    context.moveTo(x + r, y);
-    context.arcTo(x + width, y, x + width, y + height, r);
-    context.arcTo(x + width, y + height, x, y + height, r);
-    context.arcTo(x, y + height, x, y, r);
-    context.arcTo(x, y, x + width, y, r);
-    context.closePath();
-  }
-  context.fill();
+  context.arc(
+    centreX,
+    centreY,
+    radius,
+    base - PADDLE_ARC_HALF_ANGLE,
+    base + PADDLE_ARC_HALF_ANGLE,
+  );
+  context.stroke();
 }
 
 export function draw(
@@ -176,31 +234,15 @@ export function draw(
   context.globalAlpha = frame.dimmed ? 0.35 : 1;
 
   // Paddles. `self` is whichever paddle the local player steers — after the
-  // flip it is always the one at the bottom of the screen.
+  // flip it is always the one at the bottom of the screen, and the one whose
+  // face curves upwards.
   const selfIsBottom = !frame.mirrored;
-  const paddleHeight = PADDLE_THICKNESS * scale;
-  const paddleWidth = PADDLE_HALF_W * 2 * scale;
-  const radius = paddleHeight / 2;
 
-  context.fillStyle = selfIsBottom ? theme.self : theme.opponent;
-  roundedRect(
-    context,
-    px(frame.bottomX) - paddleWidth / 2,
-    py(BOTTOM_PLANE_Y) - paddleHeight / 2,
-    paddleWidth,
-    paddleHeight,
-    radius,
-  );
+  context.strokeStyle = selfIsBottom ? theme.self : theme.opponent;
+  drawPaddleArc(context, px(frame.bottomX), py(BOTTOM_ARC_CY), scale, !frame.mirrored);
 
-  context.fillStyle = selfIsBottom ? theme.opponent : theme.self;
-  roundedRect(
-    context,
-    px(frame.topX) - paddleWidth / 2,
-    py(TOP_PLANE_Y) - paddleHeight / 2,
-    paddleWidth,
-    paddleHeight,
-    radius,
-  );
+  context.strokeStyle = selfIsBottom ? theme.opponent : theme.self;
+  drawPaddleArc(context, px(frame.topX), py(TOP_ARC_CY), scale, frame.mirrored);
 
   // Ball.
   context.fillStyle = theme.ball;
