@@ -82,9 +82,16 @@ transport with a **datagram channel**, which only `@colyseus/h3-transport`
 mandates, asking for `unreliable` gets the redundancy silently dropped and a
 warning logged on every client — observed in testing.
 
-Loss is instead absorbed server-side by `defineInput(..., { idle: true })`,
-which repeats a player's last command on a tick that arrives empty. That is the
-behaviour the redundancy was for.
+Loss is instead absorbed server-side by the room simply *holding* the last
+target on a tick that arrives empty: `targetX` is state, so a tick that
+consumes nothing leaves the paddle on the course the last real input set. That
+is the behaviour the redundancy was for.
+
+`defineInput(..., { idle: true })` was the original spelling of this and was
+wrong — it does not repeat the last command, it synthesizes a frame of schema
+ZERO values, so every empty tick drove `targetX` to 0 and slid the paddle
+towards the left wall on the server only. Doing nothing is both simpler and
+correct; there is no idle policy on the input buffer.
 
 ## DEVIATION 5 — the Schema classes live in `game-core`, not the room
 
@@ -289,7 +296,7 @@ installs; without `fontconfig` and a font the card's text renders blank.
   built (`?debug=initdata`) and the matrix is written. Chat leaderboards ship
   disabled.
 - **Packet loss is simulated at the sender**, by skipping `input.send()` on
-  ~8% of frames. That exercises the server's idle-input path but is not the
+  ~8% of frames. That exercises the server's empty-tick path but is not the
   same as losing datagrams in flight, and `COLYSEUS_LATENCY` is a fixed delay
   with no jitter. The two-phones-on-mobile-data acceptance test is still the
   one that counts.

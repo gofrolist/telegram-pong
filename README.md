@@ -199,6 +199,37 @@ which drifted 0.33ms per frame against the patch stream and produced a
 convincing 21% p95 wobble that was entirely its own. Anchored, the same run
 reports 0.0000.
 
+**And check what it is not doing.** The same harness swept clean across every
+latency while a real match was unplayable, because it seated both players in
+the same millisecond — the one arrangement in which nobody ever waits on the
+invite screen, and so the one arrangement in which the server's input buffer
+never overflowed. `--host-wait` (default 3s) now plays that wait out, and the
+`pend max` column reports the worst unacked queue: past the SDK's 64-entry
+replay ring, rollback silently skips inputs and the prediction cannot be
+correct no matter what the wobble says. With the host's wait modelled, the
+buggy build scored 0.82 p95 wobble against 0.002 for the fixed one.
+
+Three more columns, each answering a complaint the wobble figure could not:
+
+- **`lead ms`** — how far ahead of confirmed server truth the drawn world runs.
+  The ball is drawn from the predicted world and the score from the replicated
+  one, so this IS the delay between watching the ball go past your paddle and
+  the point appearing. ~170ms is invisible; the broken build ran at 2070ms,
+  which a player reported as "the score is lagging".
+- **`tgtlag~` / `tgt p95`** — how far the server's idea of your desired paddle
+  X trails the one you just asked for, in field units. Zero for a player who
+  holds still *however far behind the input stream is*, which is why the same
+  bug gets reported as "it only goes wrong when I move".
+- **`--paddle still|chase|sweep`** — how much the measured bot moves. Paddle
+  motion is the axis those complaints are phrased in, so it has to be one the
+  harness can turn.
+
+**Check the instrument, again.** `sweep` was first written as a 2s square wave,
+which aliased almost exactly against the 2.07s input delay it existed to
+expose — the stale target kept landing one whole period back, on the same
+value, and the *broken* build scored better than the fixed one. It is
+aperiodic now. A periodic probe cannot measure a delay near its own period.
+
 ### Testing the netcode honestly
 
 ```sh

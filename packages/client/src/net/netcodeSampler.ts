@@ -48,12 +48,22 @@ export interface NetcodeSummary extends Record<string, number> {
   correctionMax: number;
   /** Reconciles per second, for reading the numbers above in context. */
   reconcilesPerSec: number;
+  /**
+   * How far ahead of confirmed server truth the drawn world ran, in ms.
+   *
+   * The number behind "the score is late": the ball comes from the predicted
+   * world and the score from the replicated one, so this is the gap a player
+   * sees between watching the ball go past and the point appearing.
+   */
+  leadMsMean: number;
+  leadMsP95: number;
 }
 
 export class NetcodeSampler {
   private readonly pending: number[] = [];
   private readonly driftEma: number[] = [];
   private readonly correction: number[] = [];
+  private readonly leadMs: number[] = [];
   private driftPeakMax = 0;
   private correctionMax = 0;
 
@@ -109,6 +119,7 @@ export class NetcodeSampler {
     this.pending.push(stats.pending);
     this.driftEma.push(stats.driftEma);
     this.correction.push(stats.correction);
+    this.leadMs.push(stats.leadMs);
   }
 
   /**
@@ -138,6 +149,8 @@ export class NetcodeSampler {
       correctionP95: round(p95(this.correction)),
       correctionMax: round(this.correctionMax),
       reconcilesPerSec: round(reconciles / elapsedSec),
+      leadMsMean: round(mean(this.leadMs)),
+      leadMsP95: round(p95(this.leadMs)),
     };
   }
 }

@@ -22,8 +22,11 @@
 import { Predict, type Room } from '@colyseus/sdk';
 import {
   TICK_DT,
+  TICK_MS,
+  createWorld,
   sanitizeTargetX,
   stepWithInput,
+  type MetaLike,
   type PongInput,
   type PongWorld,
   type Side,
@@ -54,9 +57,19 @@ export interface RenderSnapshot {
  * rendering problem rather than a netcode one.
  */
 export interface NetcodeStats {
-  /** Unacknowledged inputs. Times the tick interval, this is the round trip. */
+  /**
+   * Unacknowledged inputs. Times the tick interval, this is the round trip —
+   * but only while it stays inside the SDK's replay ring (64 entries at this
+   * input rate). Above that the oldest unacked inputs age out and rollback
+   * silently skips them, so a `pending` pinned near 64 is not a slow link, it
+   * is a prediction that has stopped working. See `PongRoom`'s netcode note.
+   */
   pending: number;
-  /** Size of the most recent correction, in field units. */
+  /**
+   * Size of the most recent correction, in field units: the worst |delta|
+   * across the ball's and both paddles' positions and velocities. Match meta
+   * is excluded from the pose on purpose — see {@link WorldRefs}.
+   */
   correction: number;
   /** Persistent drift. Steady and nonzero means divergence. */
   driftEma: number;
@@ -64,14 +77,57 @@ export interface NetcodeStats {
   driftPeak: number;
   /** Increments once per reconcile; differences count reconciles. */
   reconcileSeq: number;
+  /**
+   * How far ahead of confirmed server truth the drawn world is, in ms.
+   *
+   * Prediction is *supposed* to run ahead — that is what hides the round trip
+   * — but only by about one. This number is what a player feels as "the score
+   * is late": the ball is drawn from the predicted world and the score from
+   * the replicated one, so the moment you watch the ball go past your paddle
+   * is exactly this far ahead of the moment the score changes. At a healthy
+   * 200ms nobody notices; at 2s it reads as the game not having registered
+   * the point.
+   */
+  leadMs: number;
 }
 
-/** The replicated sub-schemas the simulation runs over. */
+/**
+ * The world handed to the reconciler.
+ *
+ * `ball`, `bottom` and `top` are the decoded schema instances, which the SDK
+ * auto-binds: it mirrors their scalars, re-adopts them from the server on
+ * every ack, and — the part that matters here — turns every numeric field into
+ * a smoothed *render pose* field.
+ *
+ * `meta` is deliberately NOT one of them. It is nested under a plain wrapper,
+ * which is the SDK's documented way of keeping a decoded instance opaque, and
+ * adopted by hand in {@link adoptMeta}. Bound, its nine scalars would become
+ * pose fields too — and the reconciler reports drift and correction as the
+ * worst |delta| across ALL pose fields. `meta.rng` is a 32-bit PRNG state that
+ * jumps by ~2^31 on every serve, so it buried the ball: the first field report
+ * off a real phone read `correctionMax: 2463401483` for a ball that lives in a
+ * 100x180 field. Keeping meta opaque costs one hand-written adopt and makes
+ * the correction figure mean "how far the ball jumped", which is the number
+ * the report exists to carry.
+ */
 interface WorldRefs {
-  meta: MatchMeta;
+  meta: { scalars: MetaLike };
   ball: Ball;
   bottom: Paddle;
   top: Paddle;
+}
+
+/** Copy the server's authoritative meta over the predicted mirror. */
+function adoptMeta(into: MetaLike, from: MatchMeta): void {
+  into.tick = from.tick;
+  into.phase = from.phase;
+  into.scoreBottom = from.scoreBottom;
+  into.scoreTop = from.scoreTop;
+  into.serveTo = from.serveTo;
+  into.countdown = from.countdown;
+  into.rallyHits = from.rallyHits;
+  into.rng = from.rng;
+  into.endReason = from.endReason;
 }
 
 /**
@@ -128,12 +184,27 @@ export async function attachPrediction(room: PongRoom, mySide: Side): Promise<Pr
    * datagram channel. Every WebSocket transport — including the uWebSockets
    * one this server uses — has none, so asking for `unreliable` gets the
    * redundancy silently dropped and a warning logged on every client. Loss is
-   * instead absorbed by the server's `idle: true` input option, which repeats
-   * a player's last command when a tick arrives with nothing new.
+   * instead absorbed by the server holding the last target on a tick that
+   * arrives empty, which costs it nothing: see `PongRoom.inputs`.
    */
   const input = room.input<PongInput>({ mode: 'reliable' });
 
   const state = room.state;
+
+  /**
+   * The `PongWorld` the shared step runs over, allocated ONCE.
+   *
+   * `step` is called dozens of times per correction, so it may not allocate:
+   * this object is rebound to the reconciler's mirrors on each call rather
+   * than rebuilt. Its `meta` is the predicted meta itself — the same object
+   * the world below hands the reconciler as opaque scratch.
+   */
+  const view: PongWorld = createWorld(0);
+  // Seed it now. The bound entries are mirrored from decoded truth by the
+  // constructor; an opaque part is not, and `adopt` first runs on the first
+  // ack — so without this the predicted world would sit in WAITING (and
+  // simulate nothing) for the patch or two before that ack lands.
+  adoptMeta(view.meta, state.meta);
 
   /**
    * One reconciler over the whole world rather than one per entity.
@@ -146,7 +217,7 @@ export async function attachPrediction(room: PongRoom, mySide: Side): Promise<Pr
   const sim = predict.sim<PongInput, Record<string, number>, WorldRefs>({
     input,
     world: {
-      meta: state.meta,
+      meta: { scalars: view.meta },
       ball: state.ball,
       bottom: state.bottom,
       top: state.top,
@@ -155,10 +226,20 @@ export async function attachPrediction(room: PongRoom, mySide: Side): Promise<Pr
     // glide rather than a jump, short enough that the ball is never
     // meaningfully behind the truth at the moment it reaches a paddle.
     smoothMs: 65,
+    // The bound entries re-seed themselves from the server on every ack; this
+    // covers the one part that is opaque on purpose.
+    adopt: (world) => {
+      adoptMeta(world.meta.scalars, state.meta);
+    },
     step: (ctx, world, command) => {
+      // Rebind, don't rebuild: `world.ball` and friends are the reconciler's
+      // scratch mirrors, and they are the same objects on every call.
+      view.ball = world.ball;
+      view.bottom = world.bottom;
+      view.top = world.top;
       // The SAME function the server's fixed timestep calls. This identity is
       // the whole reason the backend is TypeScript.
-      stepWithInput(world as unknown as PongWorld, mySide, command, ctx.dt || TICK_DT);
+      stepWithInput(view, mySide, command, ctx.dt || TICK_DT);
     },
   });
 
@@ -198,6 +279,9 @@ export async function attachPrediction(room: PongRoom, mySide: Side): Promise<Pr
         driftEma: sim.drift.ema,
         driftPeak: sim.drift.peak,
         reconcileSeq: sim.reconcileSeq,
+        // Predicted tick minus replicated tick. `view.meta` IS the predicted
+        // meta, and `state.meta` is the newest the server has confirmed.
+        leadMs: (view.meta.tick - state.meta.tick) * TICK_MS,
       };
     },
 

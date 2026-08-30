@@ -271,6 +271,101 @@ describe('two clients, one room', () => {
     await roomB.leave(true);
   }, 60_000);
 
+  it('drains the input buffer while the room is still waiting', async () => {
+    // THE HOST'S BUG. A host opens a room and sits on the waiting screen until
+    // someone taps the invite — 49 seconds, in the match that produced this
+    // test. The client's render loop is already running, so it is already
+    // sending an input every tick. If the server only consumes inputs once the
+    // ball is live, those pile up: the per-client buffer (64) overflows, and
+    // from then on the ack advances ONLY by dropping the oldest input, so the
+    // unacked queue stays pinned at the buffer size for the rest of the match.
+    //
+    // That number is the whole bug. The client's replay ring is 64 too, so a
+    // queue that long means the oldest unacked inputs age out of it and are
+    // SILENTLY SKIPPED on replay — the prediction can never reconstruct the
+    // server's state again, and every single reconcile lands as a correction.
+    // That is the ball teleporting.
+    const tokenA = await authenticate(4001, 'Ada');
+    const tokenB = await authenticate(4002, 'Grace');
+    const roomId = await openRoom(tokenA);
+
+    const clientA = new sdk.Client(BASE);
+    clientA.auth.token = tokenA;
+    const roomA = await clientA.joinById(roomId, { token: tokenA }, stateModule.PongState);
+
+    const inputA = roomA.input<{ targetX: number }>({ mode: 'reliable' });
+    const sender = setInterval(() => {
+      inputA.data.targetX = 50;
+      inputA.send();
+    }, gameCore.TICK_MS);
+
+    // Long enough to more than fill a 64-slot buffer at 30 Hz.
+    await new Promise((resolve) => setTimeout(resolve, 4000));
+
+    const pendingWhileWaiting = inputA.pendingCount;
+
+    // The guest arrives and the match begins.
+    const clientB = new sdk.Client(BASE);
+    clientB.auth.token = tokenB;
+    const roomB = await clientB.joinById(roomId, { token: tokenB }, stateModule.PongState);
+    await waitFor('match started', () => roomA.state.meta.phase !== gameCore.Phase.WAITING);
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    clearInterval(sender);
+
+    const pendingInMatch = inputA.pendingCount;
+
+    // The threshold is not a taste call: past the client's own replay ring the
+    // reconciler stops being able to replay everything it has sent.
+    const ring = inputA.replayBufferSize;
+    expect(pendingWhileWaiting).toBeLessThan(ring / 2);
+    expect(pendingInMatch).toBeLessThan(ring / 2);
+
+    await roomA.leave(true);
+    await roomB.leave(true);
+  }, 60_000);
+
+  it('holds a silent player\'s paddle target instead of resetting it', async () => {
+    // `idle: true` does NOT repeat the last command — it synthesizes a frame of
+    // schema ZERO values. So a tick that finds an empty buffer (ordinary mobile
+    // jitter) drove targetX to 0 and slid the paddle at full speed towards the
+    // left wall, on the server only. The client, predicting with the real
+    // target, cannot reproduce that, and the paddle it disagrees about is the
+    // one the ball bounces off.
+    const tokenA = await authenticate(4101, 'Ada');
+    const tokenB = await authenticate(4102, 'Grace');
+    const roomId = await openRoom(tokenA);
+
+    const clientA = new sdk.Client(BASE);
+    const clientB = new sdk.Client(BASE);
+    clientA.auth.token = tokenA;
+    clientB.auth.token = tokenB;
+    const roomA = await clientA.joinById(roomId, { token: tokenA }, stateModule.PongState);
+    const roomB = await clientB.joinById(roomId, { token: tokenB }, stateModule.PongState);
+
+    await waitFor('both seated', () => roomA.state.players.size === 2);
+    await waitFor('simulation running', () => roomA.state.meta.phase !== gameCore.Phase.WAITING);
+
+    const bottomSession = [...roomA.state.players.values()].find(
+      (player: { side: number }) => player.side === gameCore.SIDE_BOTTOM,
+    );
+    const bottomRoom = bottomSession?.sessionId === roomA.sessionId ? roomA : roomB;
+
+    // One input, then silence — the limit case of a client whose packets are
+    // merely late.
+    const input = bottomRoom.input<{ targetX: number }>({ mode: 'reliable' });
+    input.data.targetX = 70;
+    input.send();
+
+    await waitFor('target applied', () => Math.abs(roomA.state.bottom.targetX - 70) < 0.5);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    // Nothing was sent in that second and a half, so nothing may have changed.
+    expect(roomA.state.bottom.targetX).toBeCloseTo(70, 1);
+
+    await roomA.leave(true);
+    await roomB.leave(true);
+  }, 60_000);
+
   it('rejects a socket with no valid session token', async () => {
     const tokenA = await authenticate(3001, 'Ada');
     const roomId = await openRoom(tokenA);
