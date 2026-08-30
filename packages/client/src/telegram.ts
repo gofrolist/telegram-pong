@@ -154,8 +154,12 @@ async function mountInterface(): Promise<void> {
  *
  * The id is single-use, so it must have been minted for *this* tap.
  * Resolves `true` when Telegram reports the message was sent.
+ *
+ * Used for both halves of the loop — the invite that opens a match and the
+ * result card that closes it — because they are the same Bot API mechanism
+ * and the same picker.
  */
-export async function shareResultCard(preparedMessageId: string): Promise<boolean> {
+export async function sharePreparedMessage(preparedMessageId: string): Promise<boolean> {
   if (!shareMessage.isAvailable()) return false;
   try {
     await shareMessage(preparedMessageId);
@@ -165,6 +169,11 @@ export async function shareResultCard(preparedMessageId: string): Promise<boolea
     // reported as `share_message_failed` rather than surfaced as an error.
     return false;
   }
+}
+
+/** Whether this Telegram version can show the native picker at all. */
+export function canSharePreparedMessage(): boolean {
+  return shareMessage.isAvailable();
 }
 
 /** Close the Mini App. Used only by an explicit "exit" affordance. */

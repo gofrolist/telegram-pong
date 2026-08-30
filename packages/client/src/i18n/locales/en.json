@@ -18,7 +18,11 @@
     "waitingHint": "You can close the app. We'll message you the moment someone joins.",
     "roomExpired": "That invite is no longer open.",
     "startYourOwn": "Start your own match",
-    "tooManyRooms": "You've opened a lot of rooms. Try again a little later."
+    "tooManyRooms": "You've opened a lot of rooms. Try again a little later.",
+    "inviteFriend": "Invite a friend",
+    "inviteSending": "Opening…",
+    "inviteFailed": "Couldn't open the share sheet. Copy the link instead.",
+    "copyFailed": "Copying isn't allowed here — press and hold the link above."
   },
   "match": {
     "connecting": "Connecting…",
