@@ -25,6 +25,8 @@ const calls: string[] = [];
 let restored = false;
 /** Resolves only when a test decides to; models a host that never answers. */
 let viewportMountBlocks = false;
+/** Models the SDK finding no host to talk to: `init()` throws synchronously. */
+let initThrows = false;
 
 vi.mock('@telegram-apps/sdk', () => {
   const available = <T extends (...args: never[]) => unknown>(fn: T) =>
@@ -34,6 +36,7 @@ vi.mock('@telegram-apps/sdk', () => {
     isTMA: () => true,
     init: available(() => {
       calls.push('init');
+      if (initThrows) throw new Error('UnknownEnvError');
     }),
     restoreInitData: available(() => {
       calls.push('restoreInitData');
@@ -70,6 +73,7 @@ describe('initTelegram', () => {
     calls.length = 0;
     restored = false;
     viewportMountBlocks = false;
+    initThrows = false;
   });
 
   it('restores the init data before reading it, and returns a usable launch', async () => {
@@ -93,4 +97,14 @@ describe('initTelegram', () => {
 
     expect(env.initDataRaw).not.toBe('');
   }, 10_000);
+
+  it('rejects rather than resolving a launch it could not read', async () => {
+    initThrows = true;
+
+    // The caller has to be able to tell a failed launch from a good one. It is
+    // App's boot that turns this into an error screen; what matters here is
+    // that the failure is not swallowed into a resolved, empty environment,
+    // which would send the app to `/api/auth` with nothing to authenticate.
+    await expect(initTelegram()).rejects.toThrow();
+  });
 });

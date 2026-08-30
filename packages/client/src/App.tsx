@@ -130,6 +130,22 @@ export function App() {
     let cancelled = false;
 
     void (async () => {
+      try {
+        await boot();
+      } catch (error) {
+        // The launch path must not be able to fail silently. Anything thrown
+        // here — an SDK that cannot reach its host, a launch Telegram did not
+        // sign, a network that vanished mid-exchange — used to reject this
+        // promise with nobody listening, leaving the app on its loading screen
+        // forever: no error, no log, nothing to report. A visible failure is
+        // worth more than a hang.
+        console.error('[boot] launch failed:', error);
+        await initI18n(null, null).catch(() => {});
+        if (!cancelled) setScreen({ kind: 'failed', message: i18next.t('app.error') });
+      }
+    })();
+
+    async function boot(): Promise<void> {
       const env = await initTelegram();
       if (cancelled) return;
       setEnvironment(env);
@@ -180,7 +196,7 @@ export function App() {
       }
 
       if (!cancelled) setScreen({ kind: 'home' });
-    })();
+    }
 
     return () => {
       cancelled = true;
