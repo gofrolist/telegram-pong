@@ -224,6 +224,14 @@ export const RECONNECT_GRACE_SEC = 30;
  * unknowable on this device. Below the cliff the bot harness measures zero
  * mispredicted far reversals; above it, 18-19 per 30s.
  *
+ * CAVEAT, measured and deliberately not "fixed": that derivation is a pure
+ * NETWORK round trip, but the runtime comparison is against
+ * `room.clock.smoothedRtt()`, which times an input round trip and so runs
+ * ~110ms high (tick wait + ack patch + standing input queue — see the README's
+ * "What the far paddle costs"). The gate therefore engages at a real link far
+ * below 129ms. Which of the two numbers it *should* use is a design question,
+ * not a typo; do not change one side of it without re-measuring.
+ *
  * The ball keeps being predicted through that plane either way — declining to
  * predict it was measured and reverted, and the note in
  * {@link PREDICTION_SMOOTH_MS} is what is left of that attempt. What this
