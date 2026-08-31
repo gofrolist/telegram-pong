@@ -631,7 +631,8 @@ reject — so a nonzero one on a slow link is the gate failing, not the network.
 ### Controls
 
 Finger tracking along the field; the paddle follows X. Not buttons. Vertical
-orientation, paddles top and bottom, because phone screens are narrow.
+orientation, paddles top and bottom, because phone screens are narrow. Arrow
+keys are the desktop equivalent, and go through the same target — see below.
 
 **The paddle is kept out from under the finger steering it.** Two independent
 moves, because one of them is free and the other is not. `PADDLE_INSET` (18
@@ -661,6 +662,23 @@ construction — an honest client never sees a correction on its own paddle.
 
 `touch-action: none` plus `disableVerticalSwipes()` is what stops a downward
 drag from scrolling the page or pulling the Mini App closed mid-rally.
+
+**Arrow keys on the desktop clients**, where there is no finger to rest on the
+field. A key is a direction and the wire carries a position, so the client
+integrates one into the other: holding an arrow walks the target sideways at
+exactly `PADDLE_MAX_SPEED` — the speed the server would clamp it to anyway — and
+clamps it to the paddle's legal range. Both halves are about the release. A
+target that ran ahead of the paddle would keep it gliding after the key came up,
+and one left parked inside a wall would make the first 200ms of the next press
+do nothing. The paddle's left is the *player's* left on both sides: the top
+player's view is mirrored, so their key direction is negated on the way in, the
+same way `pointerToFieldX` un-mirrors a touch. The integration runs only while
+the room is simulating — `step` moves no paddle outside `PLAYING` and
+`COUNTDOWN`, so a key held through the waiting screen or a reconnection pause
+would otherwise park the target at the wall and glide the paddle there the
+moment play resumed. Modified arrows (`Cmd`, `Ctrl`, `Alt`) are left to the
+browser, both because they are its shortcuts and because macOS sends no `keyup`
+for a plain key while `Cmd` is down.
 
 ### Asynchronous rooms
 
