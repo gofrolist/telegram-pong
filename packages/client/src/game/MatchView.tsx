@@ -24,6 +24,7 @@ import { canSharePreparedMessage, sharePreparedMessage } from '../telegram.js';
 import { loadNetcodeOverlay } from '../debug/netcode.js';
 import { NetcodeSampler } from '../net/netcodeSampler.js';
 import { MatchFeedback } from './feedback.js';
+import { PaddleKeyboard } from './keyboard.js';
 import {
   computeOverlayAnchors,
   draw,
@@ -104,6 +105,13 @@ export function MatchView({
   const desiredXRef = useRef<number>(50);
 
   /**
+   * The arrow keys, on the desktop clients. A ref for the same reason as
+   * `desiredXRef`: it is read on every frame and written by every keystroke,
+   * and neither may render.
+   */
+  const keyboardRef = useRef<PaddleKeyboard>(new PaddleKeyboard());
+
+  /**
    * The netcode summary in progress.
    *
    * A ref rather than state, for the same reason as `desiredXRef`: it is
@@ -177,6 +185,12 @@ export function MatchView({
 
     const state = room.state as PongState;
 
+    // Where the player's own paddle was drawn last frame, and when that frame
+    // was. Both exist only to turn held arrow keys into the absolute target
+    // the rest of the pipeline speaks in; see the keyboard step in `loop`.
+    let selfPaddleX = desiredXRef.current;
+    let lastFrameAt = 0;
+
     // No-op unless the overlay was switched on. Loading it here rather than at
     // startup means it is fetched at the moment there is finally something for
     // it to show, and the SDK replays what publishers emitted before it
@@ -205,6 +219,17 @@ export function MatchView({
       if (!running) return;
       frameHandle = requestAnimationFrame(loop);
 
+      // Held arrow keys, folded into the same target the finger writes — so
+      // everything downstream, prediction included, sees one kind of input.
+      const dt = lastFrameAt === 0 ? 0 : (now - lastFrameAt) / 1000;
+      lastFrameAt = now;
+      desiredXRef.current = keyboardRef.current.step(
+        desiredXRef.current,
+        selfPaddleX,
+        dt,
+        mirrored,
+      );
+
       // Send input and advance the reconciler. Even while paused: the adapter
       // needs a tick to keep its clock aligned, and the shared simulation
       // freezes itself when the phase says so.
@@ -228,6 +253,7 @@ export function MatchView({
         bottomX: state.bottom.x,
         topX: state.top.x,
       };
+      selfPaddleX = mySide === SIDE_BOTTOM ? snapshot.bottomX : snapshot.topX;
       const selfScore = mySide === SIDE_BOTTOM ? state.meta.scoreBottom : state.meta.scoreTop;
       const opponentScore = mySide === SIDE_BOTTOM ? state.meta.scoreTop : state.meta.scoreBottom;
 
@@ -352,6 +378,43 @@ export function MatchView({
 
     return () => window.clearInterval(interval);
   }, [room, mySide, onFinished, platform]);
+
+  // ---------------------------------------------------------------------
+  // Keyboard
+  // ---------------------------------------------------------------------
+  /**
+   * Arrow keys, for the desktop clients — `tdesktop` and the browser — where
+   * there is no finger to rest on the field.
+   *
+   * Listening on the window rather than the canvas: a canvas is not focusable
+   * without a tabindex, and giving it one would put a focus ring around the
+   * field and let a stray Tab steer the paddle to the Leave button instead.
+   * Nothing else in this screen takes typed input, so the window is unambiguous.
+   *
+   * The frame loop does the moving; this only records which way.
+   */
+  useEffect(() => {
+    const keyboard = keyboardRef.current;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      // Arrows scroll the page otherwise, auto-repeats included.
+      if (keyboard.keyDown(event.key, event.repeat)) event.preventDefault();
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      keyboard.keyUp(event.key);
+    };
+    const release = () => keyboard.releaseAll();
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', release);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', release);
+      release();
+    };
+  }, []);
 
   // ---------------------------------------------------------------------
   // Touch
