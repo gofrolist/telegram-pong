@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import { FIELD_H, FIELD_W, PADDLE_INSET } from '@pong/game-core';
 
-import { computeViewport } from '../src/game/renderer.js';
+import { computeOverlayAnchors, computeViewport } from '../src/game/renderer.js';
 
 /** Bottom of the canvas to the plane the bottom paddle's ends sit on. */
 function thumbClearance(cssWidth: number, cssHeight: number): number {
@@ -70,5 +70,60 @@ describe('computeViewport', () => {
     const viewport = computeViewport(390, 1400);
     const slack = 1400 - FIELD_H * viewport.scale;
     expect(viewport.offsetY).toBeCloseTo(slack / 2, 6);
+  });
+});
+
+/**
+ * The anchors the waiting overlay lays itself out against.
+ *
+ * The overlay is DOM over a canvas, so nothing but a test connects the numbers
+ * it positions itself with to the numbers the renderer actually draws. These
+ * hard-code the field fractions on purpose: if someone moves a score numeral,
+ * the drawn position and the anchor have to move together, and a test that
+ * derived both from the same constant would not notice if they did not.
+ */
+describe('computeOverlayAnchors', () => {
+  it('reports where the centre line and the top numeral are drawn', () => {
+    for (const [w, h] of [
+      [390, 760],
+      [360, 640],
+      [430, 900],
+      [320, 568],
+    ]) {
+      const viewport = computeOverlayAnchors(computeViewport(w, h));
+      const { offsetY, scale } = computeViewport(w, h);
+
+      expect(viewport.centreLine).toBeCloseTo(offsetY + FIELD_H * 0.5 * scale, 6);
+      // 0.4em of cap above the numeral's middle baseline, at font size 22.
+      expect(viewport.scoreTop).toBeCloseTo(offsetY + (FIELD_H * 0.3 - 8.8) * scale, 6);
+      expect(viewport.bottomScoreTop).toBeCloseTo(offsetY + (FIELD_H * 0.7 - 8.8) * scale, 6);
+    }
+  });
+
+  it('leaves the lede a band clear of both the leave button and the score', () => {
+    // The lede is pinned 12px above `scoreTop` and grows upward; above it sits
+    // the leave button, which ends around 52px down on a phone with no safe
+    // area. A band this size holds the title and a two-line hint (~72px).
+    for (const [w, h] of [
+      [390, 760],
+      [360, 640],
+      [320, 568],
+    ]) {
+      const { scoreTop } = computeOverlayAnchors(computeViewport(w, h));
+      expect(scoreTop - 12 - 52).toBeGreaterThan(72);
+    }
+  });
+
+  it('leaves the invite button clear of the bottom numeral', () => {
+    // The actions block starts 16px below the centre line and its one button
+    // is 48px tall.
+    for (const [w, h] of [
+      [390, 760],
+      [360, 640],
+      [320, 568],
+    ]) {
+      const { centreLine, bottomScoreTop } = computeOverlayAnchors(computeViewport(w, h));
+      expect(centreLine + 16 + 48).toBeLessThan(bottomScoreTop);
+    }
   });
 });

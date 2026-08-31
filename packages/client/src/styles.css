@@ -241,6 +241,68 @@ body {
   pointer-events: auto;
 }
 
+/* The waiting overlay does not centre its content, because the centre is
+   occupied: the dashed halfway line is drawn straight across it, and the two
+   score numerals sit at 30% and 70% of the FIELD — which is not 30% and 70% of
+   this box, since the field is letterboxed inside the canvas. `--field-*` are
+   published by the render loop from the same viewport the canvas draws with;
+   the fallbacks are the un-letterboxed case, so a frame rendered before the
+   first publish still lands in the right place. */
+.match__overlay--waiting {
+  /* Both children place themselves; the flex centring above would fight them. */
+  display: block;
+  padding: 0;
+}
+
+/* Pinned to the underside of the top numeral and grown UPWARD, so a hint that
+   wraps to a third line on a narrow phone runs into the empty band under the
+   leave button rather than into the score. */
+.match__overlay-lede {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% - var(--field-score-top, 30%) + 12px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  /* 20px, not the overlay's usual 24: at 320px — the narrowest phone that runs
+     a Mini App — the extra 8px of line is the difference between a two-line
+     hint and a three-line one, and the third line is the one that reaches the
+     leave button. */
+  padding: 0 20px;
+}
+
+/* And the actions below the halfway line, grown downward. One button clears
+   the lower numeral with room to spare; the link-and-copy fallback is taller
+   and may reach it, which is a fair trade for a path almost nobody sees. */
+.match__overlay-actions {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(var(--field-centre-line, 50%) + 16px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 0 24px;
+}
+
+/* A 320px phone is the one width where the band between the leave button and
+   the top numeral is genuinely tight: it holds 87px, and the Russian hint sets
+   to three lines there, which is 91. Buy the four pixels back rather than let
+   the title slide under the leave button. Wider phones have 100px+ of band and
+   never reach this. */
+@media (max-width: 340px) {
+  .match__overlay--waiting .match__overlay-title {
+    font-size: 20px;
+  }
+
+  .match__overlay--waiting .match__overlay-text {
+    font-size: 14px;
+  }
+}
+
 .match__overlay-title {
   font-size: 22px;
   font-weight: 700;

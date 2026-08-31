@@ -23,7 +23,14 @@ import type { PongRoomHandle } from '../net/client.js';
 import { canSharePreparedMessage, sharePreparedMessage } from '../telegram.js';
 import { loadNetcodeOverlay } from '../debug/netcode.js';
 import { NetcodeSampler } from '../net/netcodeSampler.js';
-import { draw, pointerToFieldX, resizeCanvas, type Theme, type Viewport } from './renderer.js';
+import {
+  computeOverlayAnchors,
+  draw,
+  pointerToFieldX,
+  resizeCanvas,
+  type Theme,
+  type Viewport,
+} from './renderer.js';
 
 export interface MatchOutcome {
   matchId: string;
@@ -124,7 +131,22 @@ export function MatchView({
     const context = canvas.getContext('2d');
     if (!context) return;
 
+    // The waiting overlay is DOM laid out around things drawn on the canvas —
+    // the score numerals and the dashed centre line. It cannot read the
+    // viewport, and a percentage of the overlay is not a position on the
+    // letterboxed field, so hand it the two anchors in CSS pixels and let the
+    // stylesheet do the arithmetic. Published here, next to the resize that
+    // invalidates them, so there is exactly one place they can go stale.
+    const publishAnchors = (current: Viewport) => {
+      const host = canvas.parentElement;
+      if (!host) return;
+      const anchors = computeOverlayAnchors(current);
+      host.style.setProperty('--field-score-top', `${anchors.scoreTop}px`);
+      host.style.setProperty('--field-centre-line', `${anchors.centreLine}px`);
+    };
+
     let viewport: Viewport = resizeCanvas(canvas);
+    publishAnchors(viewport);
     let theme = readTheme();
     let running = true;
     let frameHandle = 0;
@@ -132,6 +154,7 @@ export function MatchView({
 
     const observer = new ResizeObserver(() => {
       viewport = resizeCanvas(canvas);
+      publishAnchors(viewport);
     });
     observer.observe(canvas);
 
@@ -404,42 +427,52 @@ export function MatchView({
       )}
 
       {phase === Phase.WAITING && (
-        <div className="match__overlay" role="status">
-          <div className="match__overlay-title">{t('home.waitingForOpponent')}</div>
-          <div className="match__overlay-text">{t('home.waitingHint')}</div>
-          {inviteUrl && (
-            <>
-              {/* One button, because there is one thing to do here: pick who
-                  you are playing. A URL on screen is not an action — it is
-                  something the host would have to get out of the app by hand,
-                  which is the problem the picker exists to solve. */}
-              {canPick && (
-                <button
-                  type="button"
-                  className="button button--primary"
-                  disabled={inviteSending}
-                  onClick={() => void sendInvite()}
-                >
-                  {inviteSending ? t('home.inviteSending') : t('home.inviteFriend')}
-                </button>
-              )}
-
-              {/* The link appears only when it is the only way left: a
-                  Telegram too old for `shareMessage`, or a picker that just
-                  failed. Showing it before then is clutter; showing it after
-                  is the difference between a dead end and a way out. */}
-              {(!canPick || inviteError) && (
-                <>
-                  <code className="card__link">{inviteUrl}</code>
-                  <button type="button" className="button" onClick={() => void copyInvite()}>
-                    {inviteCopied ? t('home.copied') : t('home.copyLink')}
+        <div className="match__overlay match__overlay--waiting" role="status">
+          {/* Two blocks rather than one centred stack: a stack centred on the
+              canvas lands on the dashed centre line, which runs straight
+              through the hint and makes it unreadable. The lede is pinned to
+              the underside of the top score and grows upward, so extra wrapped
+              lines can never reach the numeral; the actions are pinned below
+              the line and grow down. */}
+          <div className="match__overlay-lede">
+            <div className="match__overlay-title">{t('home.waitingForOpponent')}</div>
+            <div className="match__overlay-text">{t('home.waitingHint')}</div>
+          </div>
+          <div className="match__overlay-actions">
+            {inviteUrl && (
+              <>
+                {/* One button, because there is one thing to do here: pick who
+                    you are playing. A URL on screen is not an action — it is
+                    something the host would have to get out of the app by hand,
+                    which is the problem the picker exists to solve. */}
+                {canPick && (
+                  <button
+                    type="button"
+                    className="button button--primary"
+                    disabled={inviteSending}
+                    onClick={() => void sendInvite()}
+                  >
+                    {inviteSending ? t('home.inviteSending') : t('home.inviteFriend')}
                   </button>
-                </>
-              )}
+                )}
 
-              {inviteError && <p className="error">{inviteError}</p>}
-            </>
-          )}
+                {/* The link appears only when it is the only way left: a
+                    Telegram too old for `shareMessage`, or a picker that just
+                    failed. Showing it before then is clutter; showing it after
+                    is the difference between a dead end and a way out. */}
+                {(!canPick || inviteError) && (
+                  <>
+                    <code className="card__link">{inviteUrl}</code>
+                    <button type="button" className="button" onClick={() => void copyInvite()}>
+                      {inviteCopied ? t('home.copied') : t('home.copyLink')}
+                    </button>
+                  </>
+                )}
+
+                {inviteError && <p className="error">{inviteError}</p>}
+              </>
+            )}
+          </div>
         </div>
       )}
 
