@@ -398,6 +398,19 @@ beside the injected one so the two can never silently disagree again. Note
 that the corrected axis puts the measured cliff either side of the 129ms the
 geometry predicts, which the doubled one did not.
 
+**The two RTT columns in that table are still not the same quantity, and the
+gap is about 110ms.** `rtt` is what the harness injects; `rtt ms` is what
+`room.clock` measures on the client. Across 24 baseline matches on
+2026-08-31 they ran 150 → 259, 200 → 305, 270 → 396. The excess is pipeline,
+not link: an input waits for the next 30Hz tick, its ack rides the next patch,
+and the client reads it on the next frame. It matters in two places. The
+geometry cliff — including `EVENT_PREDICTION_RTT_CEILING_MS` — is derived as a
+pure network-staleness figure but compared at runtime against
+`room.clock.smoothedRtt()`, so the event gate engages roughly 110ms earlier
+than its own derivation implies. And a production `rttMean` of 271-297ms is
+something closer to 160-190ms of actual network round trip. Neither is wrong
+to measure; they are just two different numbers wearing one name.
+
 Every one of those reversals is at the FAR plane; the near plane has never
 produced one. Two fixes were tried and measured, and both were reverted:
 
@@ -439,9 +452,53 @@ produced one. Two fixes were tried and measured, and both were reverted:
   this harness. `--snap` is wired through the harness so the sweep is
   repeatable; production leaves it unset.
 
-What is left is a real trade against game feel — a wider, slower paddle moves the
-cliff from ~129ms RTT to 277ms and was measured 7-10x smoother at 150-207ms — and
-that is a design decision, not a netcode one. It has deliberately not been taken.
+**The wider, slower paddle was tried on 2026-08-31 and MEASURED — it does not
+work.** This section used to say a wider, slower paddle moved the cliff to
+277ms and was "7-10x smoother at 150-207ms", offered as a design decision
+nobody had taken. It has now been taken, measured, and reverted, and the old
+claim was wrong twice over.
+
+*The 277 was arithmetic on a paddle that no longer exists.* It read
+`(PADDLE_HALF_W + BALL_RADIUS) / speed` = `18 / 130`, which is the FLAT
+paddle's contact zone. The face is an arc, so the real half-width is
+`PADDLE_HALF_W * (PADDLE_ARC_R + BALL_RADIUS) / PADDLE_ARC_R` (`sim.ts`), and
+the honest figure for 16/130 is 17.28 units and a **266ms** cliff. That
+formula reproduces today's 129 exactly (`11 * 19 / 17 = 12.29`, `/190 = 65ms`
+one-way), which is how it was caught.
+
+*And the cliff did not move at all.* Eight 45s bot matches per cell,
+`PADDLE_HALF_W` 11→16, `PADDLE_ARC_R` 17→25 (the ratio holds the 40° extreme
+return angle; left at 17 the arc would have been `asin(16/17)` = 70°, ends
+facing sideways), `PADDLE_MAX_SPEED` 190→130:
+
+```
+ rtt |  rev far / 45s  |     wobble~     | points / match
+     |  base    16/130 |  base    16/130 |  base   16/130
+ 150 |  28.6 ->   25.5 | 0.0229 -> 0.0494| 3.0 ->    1.9
+ 200 |  29.4 ->   32.1 | 0.0226 -> 0.0418| 4.1 ->    2.2
+ 270 |  26.1 ->   20.0 | 0.0505 -> 0.0519| 8.0 ->    2.9
+```
+
+A cliff moved from 129 to 266 should have collapsed the 150 and 200 rows
+towards zero. They did not move. What did move is the headline metric, the
+wrong way: drawn-ball wobble roughly doubled at both, and matches took two to
+three times as long to reach seven points.
+
+The mechanism is the one this section already describes, read forwards. A
+paddle spanning a third of the field stops rallies ending — mean rally length
+went 5.4 → 10.2 hits at 150ms — and a longer rally is a rally that spends more
+of itself near `BALL_MAX_SPEED`, because `BALL_SPEEDUP` compounds per hit. A
+quicker ball gives the opponent less time to reach the interception, so their
+paddle is still *moving* when it arrives, and a moving far paddle is precisely
+what cannot be predicted. The geometry bought a 2.05x longer crossing time and
+the ball speed spent it. **Top speed is the lever; paddle size is not.**
+
+A first-ever nonzero `rev near` also appeared (7, in one match of eight at
+270ms) — worth knowing if the idea is ever revisited, because the near plane
+had produced zero in every run before it.
+
+So the trade is not "smoother ball against worse feel". It is worse ball AND
+worse feel, and it stays untaken for a better reason than taste.
 
 **The trade runs the other way too, and it is mostly about ball speed.** When the
 rally speed-up was steepened so players could feel it, the first attempt
