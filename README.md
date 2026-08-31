@@ -398,12 +398,17 @@ beside the injected one so the two can never silently disagree again. Note
 that the corrected axis puts the measured cliff either side of the 129ms the
 geometry predicts, which the doubled one did not.
 
-**The two RTT columns in that table are still not the same quantity, and the
-gap is about 110ms.** `rtt` is what the harness injects; `rtt ms` is what
+**The harness report's two RTT columns are still not the same quantity, and
+the gap is about 110ms.** `rtt` is what the harness injects; `rtt ms` is what
 `room.clock` measures on the client. Across 24 baseline matches on
 2026-08-31 they ran 150 → 259, 200 → 305, 270 → 396. The excess is pipeline,
-not link: an input waits for the next 30Hz tick, its ack rides the next patch,
-and the client reads it on the next frame. It matters in two places. The
+not link: `room.clock` times an INPUT round trip — send to ack — so the sample
+carries the wait for the next 30Hz tick, the ack's ride back out on the next
+patch, and every input still queued unacked ahead of the one being timed. The
+first two are one 33ms interval each at worst and do not add up to 110; the
+standing queue is the rest of it, which is why a bot match at **0ms** injected
+latency already measures `rtt` ~74 against a `pendingMean` of 2.2-2.6 (see
+Instrumentation). It matters in two places. The
 geometry cliff — including `EVENT_PREDICTION_RTT_CEILING_MS` — is derived as a
 pure network-staleness figure but compared at runtime against
 `room.clock.smoothedRtt()`, so the event gate engages roughly 110ms earlier
@@ -411,8 +416,10 @@ than its own derivation implies. And a production `rttMean` of 271-297ms is
 something closer to 160-190ms of actual network round trip. Neither is wrong
 to measure; they are just two different numbers wearing one name.
 
-Every one of those reversals is at the FAR plane; the near plane has never
-produced one. Two fixes were tried and measured, and both were reverted:
+Every one of those reversals is at the FAR plane; on the shipped constants the
+near plane has never produced one, and the single exception ever measured came
+from the wider-paddle experiment below. Two fixes were tried and measured, and
+both were reverted:
 
 - **Refusing to predict the far bounce** (hold the ball at the plane and wait to
   be told). Caps the worst positional error, 64 → 20, but adds a pause-and-release
@@ -481,8 +488,9 @@ facing sideways), `PADDLE_MAX_SPEED` 190→130:
 
 A cliff moved from 129 to 266 should have collapsed the 150 and 200 rows
 towards zero. They did not move. What did move is the headline metric, the
-wrong way: drawn-ball wobble roughly doubled at both, and matches took two to
-three times as long to reach seven points.
+wrong way: drawn-ball wobble roughly doubled at both, and matches took one and
+a half to nearly three times as long to reach seven points (points/match 3.0 →
+1.9, 4.1 → 2.2, 8.0 → 2.9).
 
 The mechanism is the one this section already describes, read forwards. A
 paddle spanning a third of the field stops rallies ending — mean rally length
@@ -726,10 +734,12 @@ The whole funnel is logged to `events`: `launch`, `referrer_present`,
   *plus* any backlog, and only the first is the network's: the server consumes
   one input per tick and the client sends one per tick, so a queue that gets
   deep stays deep for the rest of the match. `pendingMean - rttMean / 33.3` is
-  the backlog. Neither figure floors at zero: the ack rides a patch, so
-  `rttMean` carries up to one 33ms broadcast interval on top of the link, and
-  a bot match at 0ms injected latency measures `rtt` ~74, `pending` 2.2-2.6
-  and `leadMs` 74-86.
+  the backlog. Neither figure floors at zero, and the gap is much wider than
+  one patch: `rttMean` is an INPUT round trip, so it carries the tick wait, the
+  ack's patch, and whatever queue is standing — measured at roughly **110ms**
+  above the injected link (see "What the far paddle costs"), and a bot match at
+  0ms injected latency measures `rtt` ~74, `pending` 2.2-2.6 and `leadMs`
+  74-86. Subtract that before reading `rttMean` as a network figure.
 - **`leadMsMean` is what the player feels as a late score**, and how far past
   the far-paddle cliff (~129ms RTT) the match ran.
 - **The correction split, not `correctionMax`.** The pose mixes positions with
