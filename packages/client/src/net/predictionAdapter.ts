@@ -22,8 +22,10 @@
 import { Predict, type Room } from '@colyseus/sdk';
 import {
   DIVERGENCE_TOLERANCE,
+  EVENT_PREDICTION_RTT_CEILING_MS,
   PREDICTION_SMOOTH_MS,
   SIDE_BOTTOM,
+  SIDE_TOP,
   TICK_DT,
   TICK_MS,
   createWorld,
@@ -246,9 +248,58 @@ export interface PredictionHandle {
  * renderer, never in the simulation, because a mirrored simulation would not
  * be the same simulation.
  */
+/**
+ * Where the discrete events of a match are delivered.
+ *
+ * The reconciled world already carries everything *continuous* — where the
+ * ball is, where the paddles are — and the renderer reads that straight off
+ * {@link PredictionHandle.read}. What it cannot carry is the MOMENT something
+ * happened: a bounce is a sign change the eye has to infer, and a point is a
+ * numeral that ticks over. Those are what this sink is for, and the reason
+ * they come through the netcode rather than off a state diff is that the
+ * netcode can hand them over roughly one round trip earlier.
+ *
+ * Each call carries whether it is the EARLY delivery or the late one:
+ *
+ *  - `predicted: true` — the client's own simulation produced the event and
+ *    said so immediately. The server has not confirmed it yet and, rarely,
+ *    never will (see {@link MatchEventSink.pointRejected}).
+ *  - `predicted: false` — the server reported an event this client never
+ *    predicted, so the cue is being played now instead, ~RTT late. Above
+ *    {@link EVENT_PREDICTION_RTT_CEILING_MS} this is the normal path for hits
+ *    at the opponent's end of the field and for points at BOTH ends.
+ *
+ * The sink is called from inside the reconciler's step and from the frame
+ * loop, so every implementation must be cheap and must not throw.
+ */
+export interface MatchEventSink {
+  /**
+   * A paddle struck the ball. `side` is the paddle in FIELD coordinates
+   * (`SIDE_BOTTOM` / `SIDE_TOP`), not screen coordinates — the mirroring is
+   * the renderer's and belongs in exactly one place.
+   */
+  hit(side: Side, predicted: boolean): void;
+  /** A point landed. `scorer` is the side that gained it, in field terms. */
+  point(scorer: Side, predicted: boolean): void;
+  /**
+   * A predicted point turned out not to have happened: the server ran the
+   * very timeline that predicted it and stayed silent, so a paddle reached
+   * the ball after all. Undo whatever `point(..., true)` started.
+   *
+   * Only reachable below {@link EVENT_PREDICTION_RTT_CEILING_MS} — above it
+   * no point is predicted, so none can be taken back.
+   */
+  pointRejected(): void;
+}
+
 export interface PredictionOptions {
   /** Correction easing window. Defaults to {@link PREDICTION_SMOOTH_MS}. */
   smoothMs?: number;
+  /**
+   * Where hits and points are delivered. Omitted, the channels are not
+   * declared at all and the adapter behaves exactly as it did before them.
+   */
+  events?: MatchEventSink;
   /**
    * Teleport threshold, in field units. A reconcile whose worst per-field
    * correction exceeds it POPS to server truth instead of easing out over
@@ -267,6 +318,7 @@ export async function attachPrediction(
 ): Promise<PredictionHandle> {
   const smoothMs = options.smoothMs ?? PREDICTION_SMOOTH_MS;
   const snap = options.snap;
+  const events = options.events;
   // The reconciler binds to the *decoded* schema instances, which only exist
   // once the first state patch has been applied — before that, `room.state`
   // holds locally auto-instantiated placeholders with no ref id, and the SDK
@@ -275,6 +327,66 @@ export async function attachPrediction(
   await waitForDecodedState(room);
 
   const predict = Predict.get(room);
+
+  /**
+   * Optimistic event channels — a point, and a paddle striking the ball.
+   *
+   * A channel is the SDK's answer to the one thing a reconciled world cannot
+   * express: a discrete event, predicted locally, that the server may or may
+   * not go on to agree with. It owns the whole lifecycle. `ctx.predict(...)`
+   * from inside the step is LIVE-ONLY by construction — a rollback replay
+   * re-runs the physics and re-derives the same bounce a dozen times, and
+   * every one of those is silently skipped, so the cue fires exactly once.
+   * Settlement is anchored to the ACK STREAM rather than to a wall clock: an
+   * entry rejects only once the server has processed past the tick that
+   * predicted it without saying anything, which is the one test that cannot
+   * be fooled by latency.
+   *
+   * `uniqueBy: () => 0` gives each channel a single pending slot, so a
+   * confirm needs no key. That is sound because of the geometry rather than
+   * by luck: consecutive paddle hits are a full traverse apart (at
+   * BALL_MAX_SPEED, ~1.5s) and a point is followed by a countdown, so at any
+   * realistic round trip there is never more than one of either in flight.
+   *
+   * There is no `onUnpredicted` on either channel deliberately — the
+   * settlement path below reads `confirm()`'s return instead, because it also
+   * needs to know WHICH side the server's event belonged to, and the keyless
+   * callback is not told.
+   */
+  const points = events
+    ? predict.defineEvent<Side>({
+        label: 'point',
+        uniqueBy: () => 0,
+        onPredict: (scorer) => events.point(scorer, true),
+        onReject: () => events.pointRejected(),
+      })
+    : null;
+
+  const hits = events
+    ? predict.defineEvent<Side>({
+        label: 'hit',
+        uniqueBy: () => 0,
+        onPredict: (side) => events.hit(side, true),
+        // No `onReject`. A predicted hit that never happened means the ball
+        // actually went past that paddle — which is a POINT, and the point
+        // channel is already firing. A retraction here would be a second cue
+        // for one event.
+      })
+    : null;
+
+  /**
+   * Whether the link is fast enough to predict the events it gates.
+   *
+   * Sampled once per frame in `frame()` rather than read inside the step: the
+   * step runs dozens of times per reconcile and must stay a straight line of
+   * arithmetic, and a branch that could flip *between* a live step and its
+   * replays is a determinism smell even where it happens to be harmless.
+   *
+   * See {@link EVENT_PREDICTION_RTT_CEILING_MS} for what it gates — far-plane
+   * hits and points at either plane — and why the near-plane HIT is the one
+   * cue that stays unconditional.
+   */
+  let belowEventCliff = true;
 
   /**
    * The input handle is the ONLY thing that stages and sends.
@@ -361,18 +473,113 @@ export async function attachPrediction(
       view.ball = world.ball;
       view.bottom = world.bottom;
       view.top = world.top;
+
+      // Counters read BEFORE the step, so the events below are edges rather
+      // than levels. `rallyHits` is reset to 0 by a serve and the scores by a
+      // new match, which is why every comparison is a strict increase.
+      const hitsBefore = view.meta.rallyHits;
+      const bottomScoreBefore = view.meta.scoreBottom;
+      const topScoreBefore = view.meta.scoreTop;
+
       // The SAME function the server's fixed timestep calls, with the same
       // arguments. This identity is the whole reason the backend is
       // TypeScript, and an earlier attempt to break it deliberately — having
       // the client decline to predict the opponent's bounce — measured worse
       // and was reverted. See README, "What the far paddle costs".
       stepWithInput(view, mySide, command, ctx.dt || TICK_DT);
+
+      // Both channels exist or neither does — they are declared together off
+      // the same `events` option. Testing both is what lets the two
+      // `ctx.predict` calls below stand without a non-null assertion.
+      if (!hits || !points) return;
+
+      if (view.meta.rallyHits > hitsBefore) {
+        // WHICH paddle, read off the ball's vertical direction. Only a paddle
+        // ever flips `vy` — a side wall flips `vx` — so a ball leaving this
+        // step headed up (`vy < 0`) came off the bottom face, and one headed
+        // down came off the top. `MIN_VERTICAL_RATIO` guarantees it is never
+        // exactly zero. Cheaper and more robust than re-deriving the contact.
+        const struck: Side = view.ball.vy < 0 ? SIDE_BOTTOM : SIDE_TOP;
+        if (struck === mySide || belowEventCliff) ctx.predict(hits, struck);
+      }
+
+      const scored: Side | null =
+        view.meta.scoreBottom > bottomScoreBefore
+          ? SIDE_BOTTOM
+          : view.meta.scoreTop > topScoreBefore
+            ? SIDE_TOP
+            : null;
+      // Points are gated as one, without asking which plane the ball
+      // crossed. A point of MINE is the far-plane one — their paddle had the
+      // chance to stop it, and their paddle this client cannot know — but a
+      // point of THEIRS is only as sound as the far bounce that sent the ball
+      // down here, so above the cliff both are guesses and only one of them
+      // looks like it should not be. See `EVENT_PREDICTION_RTT_CEILING_MS`.
+      if (scored !== null && belowEventCliff) ctx.predict(points, scored);
     },
   });
+
+  /**
+   * Replicated counters, so the server's own version of an event can be told
+   * apart from no event at all.
+   *
+   * Polled once per frame rather than subscribed through the schema callbacks:
+   * the frame loop is already reading `state.meta` for `leadMs`, a poll at
+   * 60-120Hz is two orders of magnitude inside the channels' settlement grace
+   * (10 ticks, ~333ms), and it keeps this file's promise that the only
+   * Colyseus API surface in the client is the prediction one.
+   */
+  let lastRallyHits = state.meta.rallyHits;
+  let lastScoreBottom = state.meta.scoreBottom;
+  let lastScoreTop = state.meta.scoreTop;
+
+  /**
+   * Settle the channels against replicated truth.
+   *
+   * `confirm()` returning 0 means nothing was pending — the server saw an
+   * event this client never predicted. That is not an error and it is not
+   * rare: above {@link EVENT_PREDICTION_RTT_CEILING_MS} it is the only path
+   * left for a far-plane hit and for EVERY point, where the prediction is
+   * deliberately withheld. The cue is played now instead, flagged as the late
+   * delivery.
+   */
+  function settleAgainstServer(): void {
+    if (!events || !hits || !points) return;
+
+    const rallyHits = state.meta.rallyHits;
+    if (rallyHits > lastRallyHits) {
+      // Same read as the predicted side, but off SERVER TRUTH rather than the
+      // prediction, and the difference is load-bearing. A bound entry is
+      // mirrored: the reconciler steps a plain copy and never writes back to
+      // the decoded tree, so `state.ball` is the replicated ball and
+      // `view.ball` (above) is the predicted one. The pose the renderer draws
+      // is a third thing again, reached through `sim.value(...)`.
+      //
+      // The patch rate is pinned to the tick, so the velocity landing with
+      // this increment is the post-bounce one.
+      const struck: Side = state.ball.vy < 0 ? SIDE_BOTTOM : SIDE_TOP;
+      if (hits.confirm() === 0) events.hit(struck, false);
+    }
+    lastRallyHits = rallyHits;
+
+    const scoreBottom = state.meta.scoreBottom;
+    const scoreTop = state.meta.scoreTop;
+    if (scoreBottom > lastScoreBottom || scoreTop > lastScoreTop) {
+      const scorer: Side = scoreBottom > lastScoreBottom ? SIDE_BOTTOM : SIDE_TOP;
+      if (points.confirm() === 0) events.point(scorer, false);
+    }
+    lastScoreBottom = scoreBottom;
+    lastScoreTop = scoreTop;
+  }
 
   return {
     frame(desiredTargetX: number, now: number): void {
       const target = sanitizeTargetX(desiredTargetX);
+
+      // Decide the event-prediction policy for the steps this frame is about
+      // to run, before any of them run. One clock read, not one per replayed
+      // tick.
+      belowEventCliff = room.clock.smoothedRtt() < EVENT_PREDICTION_RTT_CEILING_MS;
 
       // How many fixed input steps are due this frame. On a 120 Hz phone this
       // is usually 0 and occasionally 1; on a stuttering one it may be 2 or 3.
@@ -388,6 +595,14 @@ export async function attachPrediction(
         input.data.targetX = target;
         input.send();
       }
+
+      // AFTER the steps, and the order is load-bearing in exactly one
+      // direction: when the server's version of an event lands in the same
+      // frame the local sim finally reaches it, predicting first leaves an
+      // entry for `confirm()` to settle, so the cue fires once. Settling
+      // first would report the event LATE and then predict it again — the
+      // double buzz the channels exist to prevent.
+      settleAgainstServer();
     },
 
     read(): RenderSnapshot {

@@ -50,7 +50,7 @@ import {
 } from '@pong/game-core';
 import { PongState } from '@pong/game-core/net';
 
-import { attachPrediction } from '../src/net/predictionAdapter.js';
+import { attachPrediction, type MatchEventSink } from '../src/net/predictionAdapter.js';
 // The server spawn and its teardown live in the harness, shared with
 // `harness/bots.ts`. One copy, because getting the teardown wrong produces a
 // failure that looks nothing like its cause — see the note there.
@@ -103,7 +103,38 @@ describe('prediction under 150ms RTT', () => {
     const sideA: Side = roomA.state.players.get(roomA.sessionId)?.side === SIDE_TOP ? SIDE_TOP : SIDE_BOTTOM;
     const sideB: Side = sideA === SIDE_BOTTOM ? SIDE_TOP : SIDE_BOTTOM;
 
-    const predictionA = await attachPrediction(roomA, sideA);
+    /**
+     * Every discrete event delivered to client A, and whether it arrived
+     * early (predicted) or late (the server's own word for it).
+     *
+     * Rides the same rally as the correction measurements above rather than
+     * getting its own match: the events ARE that rally, so a separate run
+     * would only be measuring a second sample of the same thing.
+     */
+    const startedAt = Date.now();
+    const delivered: Array<{
+      kind: 'hit' | 'point';
+      side: Side;
+      predicted: boolean;
+      atMs: number;
+      serverHitsThen: number;
+    }> = [];
+    const record = (kind: 'hit' | 'point', side: Side, predicted: boolean) => {
+      delivered.push({
+        kind,
+        side,
+        predicted,
+        atMs: Date.now() - startedAt,
+        serverHitsThen: roomA.state.meta.rallyHits,
+      });
+    };
+    const recorder: MatchEventSink = {
+      hit: (side, predicted) => record('hit', side, predicted),
+      point: (side, predicted) => record('point', side, predicted),
+      pointRejected: () => {},
+    };
+
+    const predictionA = await attachPrediction(roomA, sideA, { events: recorder });
     const predictionB = await attachPrediction(roomB, sideB);
 
     await waitFor('serve', () => roomA.state.meta.phase === Phase.PLAYING);
@@ -115,6 +146,12 @@ describe('prediction under 150ms RTT', () => {
     const ballCorrections: number[] = [];
     let frames = 0;
     let droppedInputs = 0;
+
+    // The server's own hit count, accumulated across serves — `rallyHits` is
+    // reset to 0 by every serve, so the running total has to be summed from
+    // its increases rather than read at the end.
+    let serverHits = 0;
+    let lastRallyHits = roomA.state.meta.rallyHits;
 
     // Drive both clients at roughly 60 fps for ~8 seconds of real play.
     const deadline = Date.now() + 8000;
@@ -139,6 +176,10 @@ describe('prediction under 150ms RTT', () => {
         predictionA.frame(targetA, now);
         predictionB.frame(targetB, now);
       }
+
+      const rallyHits = roomA.state.meta.rallyHits;
+      if (rallyHits > lastRallyHits) serverHits += rallyHits - lastRallyHits;
+      lastRallyHits = rallyHits;
 
       const predicted = predictionA.read();
       const truth = roomA.state;
@@ -237,6 +278,78 @@ describe('prediction under 150ms RTT', () => {
     // measuring a stationary ball.
     expect(roomA.state.meta.rallyHits + roomA.state.meta.scoreBottom + roomA.state.meta.scoreTop)
       .toBeGreaterThan(0);
+
+    // ---------------------------------------------------------------------
+    // The event channels
+    // ---------------------------------------------------------------------
+
+    const deliveredHits = delivered.filter((event) => event.kind === 'hit');
+    const nearHits = deliveredHits.filter((event) => event.side === sideA);
+
+    console.log(
+      `[events] delivered=${delivered.length} hits=${deliveredHits.length} ` +
+        `serverHits=${serverHits} near=${nearHits.length} ` +
+        `late=${deliveredHits.filter((e) => !e.predicted).length} ` +
+        `points=${delivered.filter((e) => e.kind === 'point').length}`,
+    );
+    console.log(
+      '[events] ' +
+        delivered
+          .map(
+            (e) =>
+              `${e.atMs}ms ${e.kind} ${e.side === sideA ? 'near' : 'far'} ` +
+              `${e.predicted ? 'predicted' : 'LATE'} (rally=${e.serverHitsThen})`,
+          )
+          .join(' | '),
+    );
+
+    // The wiring works at all: something was delivered.
+    expect(deliveredHits.length).toBeGreaterThan(0);
+
+    // EXACTLY ONE cue per hit, and this is THE assertion the channels exist
+    // for. A hit is predicted from the live step and then confirmed off
+    // replicated state; if the confirm failed to settle the pending entry the
+    // same hit would be reported twice — once early, once late — which is a
+    // double buzz in the player's hand and would show up in no other column
+    // of any report. The tolerance is one, for a hit predicted in the last
+    // frame of the loop whose confirmation had not yet arrived.
+    expect(Math.abs(deliveredHits.length - serverHits)).toBeLessThanOrEqual(1);
+
+    // The prediction path fires at all, rather than every cue quietly falling
+    // through to the server's word for it. A build whose `ctx.predict` never
+    // ran would pass every assertion above this one.
+    expect(deliveredHits.some((event) => event.predicted)).toBe(true);
+    expect(nearHits.length).toBeGreaterThan(0);
+
+    // No point is predicted at this latency, at EITHER plane. 150ms RTT is
+    // past the 129ms ceiling, so the gate should have withheld every point —
+    // including the near-plane ones, which look safe (our own paddle is exact,
+    // `selfPaddleCorrection` is 0.000) and are not: the ball reaching our
+    // plane came off the far paddle and carries that bounce's error down the
+    // field. See `EVENT_PREDICTION_RTT_CEILING_MS`.
+    //
+    // Written as a filter rather than a count because a rally of this length
+    // often ends without conceding at all — the run this was written against
+    // logs `points=0`. That makes the assertion vacuous on those runs and
+    // load-bearing on the ones where a point does land, which is the right
+    // trade against a flaky `toBeGreaterThan(0)` on an event the harness
+    // cannot make happen on demand.
+    expect(delivered.filter((event) => event.kind === 'point' && event.predicted)).toEqual([]);
+
+    // NOT asserted: that every near-plane hit is predicted.
+    //
+    // It is the overwhelming majority — the run this was written against goes
+    // `near predicted | far LATE | near predicted | far LATE` — and it is
+    // tempting to assert, because our own paddle is exact here
+    // (`selfPaddleCorrection` is 0.000 in every run). But the paddle being
+    // exact does not make the CONTACT exact: at this latency the far bounce
+    // is a coin flip, and its error rides the ball all the way down the field,
+    // so the ball can arrive at our own paddle up to ~29 units from where the
+    // server has it and be predicted to sail past something it actually hit.
+    // That near cue then arrives with the server's word for it, one round trip
+    // late. Asserting otherwise made this test fail about one run in five —
+    // it was measuring the far paddle, which the block above already measures
+    // honestly, and calling it a near-plane regression.
 
     predictionA.dispose();
     predictionB.dispose();
