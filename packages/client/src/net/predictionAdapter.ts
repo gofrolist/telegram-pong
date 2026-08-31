@@ -120,6 +120,29 @@ export interface NetcodeStats {
    * the point.
    */
   leadMs: number;
+  /**
+   * The LINK's own round trip, in ms, smoothed — the SDK's measurement, taken
+   * by correlating the server-echoed input seq with the client's send times.
+   *
+   * The one number that reads {@link pending} correctly. Unacked inputs are
+   * two things added together: the round trip, which is the network's and
+   * which prediction exists to hide, and a BACKLOG, which is ours and which
+   * nothing drains — the server consumes one input per tick and the client
+   * sends one per tick, so a queue that gets deep stays deep for the rest of
+   * the match. `pending - rtt / TICK_MS` separates them, and without it a
+   * field report cannot tell a slow link from a queue we built ourselves.
+   *
+   * Read it as the round trip PLUS up to one patch interval: the ack rides a
+   * patch, so the sample is quantised by the 33ms broadcast cadence. The bot
+   * harness measures a floor of ~74ms against an injected 0, and tracks an
+   * injected 200 to within 2ms above that.
+   */
+  rttMs: number;
+  /**
+   * Interarrival jitter on the patch stream (RFC 3550), in ms. ~0 on a steady
+   * link at any latency, so it separates "far away" from "unstable".
+   */
+  jitterMs: number;
 }
 
 /**
@@ -390,6 +413,12 @@ export async function attachPrediction(
         // Predicted tick minus replicated tick. `view.meta` IS the predicted
         // meta, and `state.meta` is the newest the server has confirmed.
         leadMs: (view.meta.tick - state.meta.tick) * TICK_MS,
+        // Both come from the room clock the SDK already maintains off the
+        // TIMED prefix on every patch — including the heartbeat patch a room
+        // with input sends when nothing changed, so they keep updating on the
+        // waiting screen. Reading them costs a property access.
+        rttMs: room.clock.smoothedRtt(),
+        jitterMs: room.clock.jitter(),
       };
     },
 

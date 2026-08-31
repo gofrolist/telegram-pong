@@ -46,6 +46,32 @@ export interface NetcodeSummary extends Record<string, number> {
   /** Correction sizes, in field units — the visible "jump" when one lands. */
   correctionP95: number;
   correctionMax: number;
+  /**
+   * The same correction, split by what it was ON.
+   *
+   * `correctionMax` is the worst delta across every pose field, and the pose
+   * mixes positions with VELOCITIES: a mispredicted bounce corrects `ball.vx`
+   * by up to twice the ball's speed, so it dominates the headline figure and
+   * a report of "184" reads like a ball teleporting across the field when it
+   * is really a ball sent the wrong way. These four say which it was.
+   * `selfPaddle` must stay ~0 — anything else is a genuine desync — while
+   * `oppPaddle` is nonzero by construction.
+   */
+  ballCorrP95: number;
+  ballCorrMax: number;
+  ballVelCorrMax: number;
+  selfPaddleCorrMax: number;
+  oppPaddleCorrMax: number;
+  /**
+   * The link's own round trip (ms), smoothed, and its jitter.
+   *
+   * Reads `pendingMean` for you: unacked inputs are the round trip PLUS any
+   * backlog, and only the first is the network's fault. See
+   * `NetcodeStats.rttMs`.
+   */
+  rttMean: number;
+  rttP95: number;
+  jitterMean: number;
   /** Reconciles per second, for reading the numbers above in context. */
   reconcilesPerSec: number;
   /**
@@ -64,8 +90,15 @@ export class NetcodeSampler {
   private readonly driftEma: number[] = [];
   private readonly correction: number[] = [];
   private readonly leadMs: number[] = [];
+  private readonly rttMs: number[] = [];
+  private readonly jitterMs: number[] = [];
+  private readonly ballCorr: number[] = [];
   private driftPeakMax = 0;
   private correctionMax = 0;
+  private ballCorrMax = 0;
+  private ballVelCorrMax = 0;
+  private selfPaddleCorrMax = 0;
+  private oppPaddleCorrMax = 0;
 
   private frames = 0;
   private frameMaxMs = 0;
@@ -108,6 +141,14 @@ export class NetcodeSampler {
     // Every frame: the extremes, which are single-frame events.
     if (stats.driftPeak > this.driftPeakMax) this.driftPeakMax = stats.driftPeak;
     if (stats.correction > this.correctionMax) this.correctionMax = stats.correction;
+    if (stats.ballCorrection > this.ballCorrMax) this.ballCorrMax = stats.ballCorrection;
+    if (stats.ballVelCorrection > this.ballVelCorrMax) this.ballVelCorrMax = stats.ballVelCorrection;
+    if (stats.selfPaddleCorrection > this.selfPaddleCorrMax) {
+      this.selfPaddleCorrMax = stats.selfPaddleCorrection;
+    }
+    if (stats.oppPaddleCorrection > this.oppPaddleCorrMax) {
+      this.oppPaddleCorrMax = stats.oppPaddleCorrection;
+    }
     this.firstReconcileSeq ??= stats.reconcileSeq;
     this.lastReconcileSeq = stats.reconcileSeq;
 
@@ -120,6 +161,13 @@ export class NetcodeSampler {
     this.driftEma.push(stats.driftEma);
     this.correction.push(stats.correction);
     this.leadMs.push(stats.leadMs);
+    this.ballCorr.push(stats.ballCorrection);
+    // The clock reports 0 until its first RTT-valid sample lands, which is a
+    // reading of "not known yet", not of a 0ms link. Averaging those in would
+    // drag the figure toward zero on exactly the short matches where every
+    // sample counts.
+    if (stats.rttMs > 0) this.rttMs.push(stats.rttMs);
+    if (stats.rttMs > 0) this.jitterMs.push(stats.jitterMs);
   }
 
   /**
@@ -148,9 +196,17 @@ export class NetcodeSampler {
       driftPeakMax: round(this.driftPeakMax),
       correctionP95: round(p95(this.correction)),
       correctionMax: round(this.correctionMax),
+      ballCorrP95: round(p95(this.ballCorr)),
+      ballCorrMax: round(this.ballCorrMax),
+      ballVelCorrMax: round(this.ballVelCorrMax),
+      selfPaddleCorrMax: round(this.selfPaddleCorrMax),
+      oppPaddleCorrMax: round(this.oppPaddleCorrMax),
       reconcilesPerSec: round(reconciles / elapsedSec),
       leadMsMean: round(mean(this.leadMs)),
       leadMsP95: round(p95(this.leadMs)),
+      rttMean: round(mean(this.rttMs)),
+      rttP95: round(p95(this.rttMs)),
+      jitterMean: round(mean(this.jitterMs)),
     };
   }
 }

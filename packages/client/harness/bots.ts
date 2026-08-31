@@ -204,6 +204,15 @@ interface MatchReport {
    *  is the gap between watching the ball go past and the score changing. */
   leadMsMean: number;
   /**
+   * The client's own measurement of the round trip, from `room.clock`.
+   *
+   * Here it has a known right answer — the latency this run injected — which
+   * is the point of reporting it: the field summary carries the same number
+   * to separate a slow link from a backlog, and a diagnostic that has never
+   * been checked against a known input is a diagnostic nobody should trust.
+   */
+  rttMean: number;
+  /**
    * How far the server's idea of the measured bot's desired paddle X trails
    * the one it last asked for, in FIELD UNITS (the field is 100 wide).
    *
@@ -243,6 +252,9 @@ async function playOneMatch(port: number, options: Options, rttMs: number, seed:
   const driftEma: number[] = [];
   const pending: number[] = [];
   const leadMs: number[] = [];
+  /** What the CLIENT's own clock says the round trip is, against the injected
+   *  `rttMs` above — the known answer this column is checked against. */
+  const clockRttMs: number[] = [];
   const targetLag: number[] = [];
   let driftPeakMax = 0;
   let correctionMax = 0;
@@ -312,6 +324,8 @@ async function playOneMatch(port: number, options: Options, rttMs: number, seed:
       driftEma.push(stats.driftEma);
       pending.push(stats.pending);
       leadMs.push(stats.leadMs);
+      // 0 means the clock has no RTT sample yet, not a 0ms link.
+      if (stats.rttMs > 0) clockRttMs.push(stats.rttMs);
       // What the server currently believes this bot is asking for, against
       // what it just asked for.
       const serverTarget =
@@ -392,6 +406,7 @@ async function playOneMatch(port: number, options: Options, rttMs: number, seed:
     reversalsFarHalf,
     reversalsNearHalf,
     leadMsMean: round(mean(leadMs)),
+    rttMean: round(mean(clockRttMs)),
     targetLagMean: round(mean(targetLag)),
     targetLagP95: round(p95(targetLag)),
     pendingMean: round(mean(pending)),
@@ -445,6 +460,7 @@ async function main(): Promise<void> {
     'rev far'.padStart(8),
     'rev near'.padStart(9),
     'lead ms'.padStart(8),
+    ' rtt ms'.padStart(8),
     'tgtlag~'.padStart(8),
     'tgt p95'.padStart(8),
     'pending'.padStart(8),
@@ -471,6 +487,7 @@ async function main(): Promise<void> {
         String(r.reversalsFarHalf).padStart(8),
         String(r.reversalsNearHalf).padStart(9),
         r.leadMsMean.toFixed(0).padStart(8),
+        r.rttMean.toFixed(0).padStart(8),
         r.targetLagMean.toFixed(1).padStart(8),
         r.targetLagP95.toFixed(1).padStart(8),
         r.pendingMean.toFixed(2).padStart(8),

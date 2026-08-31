@@ -45,6 +45,22 @@ export interface ServerOptions {
   oneWayLatencyMs: number;
 }
 
+/**
+ * `COLYSEUS_LATENCY` is a ROUND TRIP, not a one-way delay.
+ *
+ * Colyseus halves it and applies half to each direction
+ * (`applySimulatedLatency` in `@colyseus/core/Server`), so handing it a
+ * one-way figure injects half the latency the caller asked for. This harness
+ * did exactly that, and then labelled its rows with twice the flag — so every
+ * latency in every report it has ever printed was 2x the truth, in the
+ * direction that flatters the build. The `rtt ms` column exists so that a
+ * mistake of this shape cannot survive a run: it is the client's own
+ * measurement, and it has to track this number.
+ */
+function roundTripEnv(oneWayLatencyMs: number): string {
+  return String(oneWayLatencyMs * 2);
+}
+
 export function baseUrl(port: number): string {
   return `http://localhost:${port}`;
 }
@@ -70,8 +86,8 @@ export function startServer({ port, oneWayLatencyMs }: ServerOptions): Promise<C
       // Unreachable on purpose: a match must not depend on the database.
       DATABASE_URL: 'postgresql://nobody:nobody@127.0.0.1:1/nowhere',
       SESSION_SECRET: 'a-session-secret-of-at-least-32-characters',
-      // Colyseus' own transport-level delay, applied in both directions.
-      COLYSEUS_LATENCY: String(oneWayLatencyMs),
+      // Colyseus' own transport-level delay, applied half in each direction.
+      COLYSEUS_LATENCY: roundTripEnv(oneWayLatencyMs),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

@@ -209,8 +209,16 @@ replay ring, rollback silently skips inputs and the prediction cannot be
 correct no matter what the wobble says. With the host's wait modelled, the
 buggy build scored 0.82 p95 wobble against 0.002 for the fixed one.
 
-Three more columns, each answering a complaint the wobble figure could not:
+Four more columns, each answering a complaint the wobble figure could not:
 
+- **`rtt ms`** — the round trip as the *client's own clock* measures it, beside
+  the `rtt` this run injected. The two have to track, and for months they did
+  not: the harness fed `COLYSEUS_LATENCY` a one-way delay when Colyseus reads
+  it as a round trip, so every published figure was taken at half its stated
+  latency. This column is the guard. The same number now rides home in the
+  field summary, where it is the only way to read `pending` correctly — unacked
+  inputs are the round trip PLUS a backlog, and only one of those is the
+  network's fault.
 - **`lead ms`** — how far ahead of confirmed server truth the drawn world runs.
   The ball is drawn from the predicted world and the score from the replicated
   one, so this IS the delay between watching the ball go past your paddle and
@@ -374,11 +382,21 @@ predicting it is a coin flip that the server overturns one round trip later:
 ```
  rtt | wobble~ | ball corr max | mispredicted reversals / 30s
    0 |  0.0003 |          1.14 |  0
- 120 |  0.0004 |          0.79 |  0
- 174 |  0.0021 |          2.15 |  0     <- clean
- 300 |  0.0332 |         58.08 | 18     <- cliff, at 2.2x the contact zone
- 414 |  0.1377 |         64.42 | 19
+  60 |  0.0004 |          0.79 |  0
+  87 |  0.0021 |          2.15 |  0     <- clean, under the 129ms cliff
+ 150 |  0.0332 |         58.08 | 18     <- over it
+ 207 |  0.1377 |         64.42 | 19
 ```
+
+**These RTTs were relabelled on 2026-08-30 and the old ones are wrong.** The
+harness handed `COLYSEUS_LATENCY` a one-way delay, and Colyseus reads that
+variable as a *round trip* — so every run injected half the latency its report
+claimed, and this table used to say 174 where the link was really 87. The
+measurements themselves are unaffected; only the axis was. The fix is in
+`harness/support.ts`, and the harness now prints the client's own `rtt ms`
+beside the injected one so the two can never silently disagree again. Note
+that the corrected axis puts the measured cliff either side of the 129ms the
+geometry predicts, which the doubled one did not.
 
 Every one of those reversals is at the FAR plane; the near plane has never
 produced one. Two fixes were tried and measured, and both were reverted:
@@ -403,33 +421,33 @@ produced one. Two fixes were tried and measured, and both were reverted:
   significant (Mann-Whitney |z| < 0.9). The SDK's sizing advice, "above
   `maxSpeed x patch interval`", silently assumes a position-only pose.
 
-  *A threshold above the velocity noise floor helps at 174ms and hurts at
-  300ms.* At 100 the effect at 174ms is a variance collapse rather than a shift
+  *A threshold above the velocity noise floor helps at 87ms and hurts at
+  150ms.* At 100 the effect at 87ms is a variance collapse rather than a shift
   — mean 0.0145 -> 0.0055, worst match 0.0465 -> 0.0068, four matches in ten
-  over 0.015 -> none (variance ratio F(9,9) = 142). But at 300ms the same
+  over 0.015 -> none (variance ratio F(9,9) = 142). But at 150ms the same
   setting measured **4.5x worse**, 0.0109 -> 0.0488, with complete separation
   between the arms (Mann-Whitney z = -3.36; the best snap match was worse than
   the worst non-snap one). The reason is the trade itself: `snap` swaps a rare
-  smooth-but-wrong glide for a hard cut, and at 300ms mispredictions stop being
+  smooth-but-wrong glide for a hard cut, and at 150ms mispredictions stop being
   rare, so the ball pops constantly. A tuning that helps where the game is
   already fine and hurts where it is not is backwards, so it stays off.
 
   One caveat on the metric, since it flatters `snap`: wobble is sampled only in
   open field, and the pop lands at the far paddle (outside the band) while the
-  glide's tail extends into it. The 174ms improvement is therefore an upper
+  glide's tail extends into it. The 87ms improvement is therefore an upper
   bound, and whether the cut itself reads badly is a question for eyes, not for
   this harness. `--snap` is wired through the harness so the sweep is
   repeatable; production leaves it unset.
 
 What is left is a real trade against game feel — a wider, slower paddle moves the
-cliff from ~129ms RTT to 277ms and was measured 7-10x smoother at 300-414ms — and
+cliff from ~129ms RTT to 277ms and was measured 7-10x smoother at 150-207ms — and
 that is a design decision, not a netcode one. It has deliberately not been taken.
 
 **The trade runs the other way too, and it is mostly about ball speed.** When the
 rally speed-up was steepened so players could feel it, the first attempt
 (`BALL_SPEEDUP` 1.045 → 1.09, ceiling left at 132) measured 16.5 mispredicted far
-reversals per 30s at 174ms RTT against the old build's 4.0, with ball correction
-29.6 against 2.4 — a cliff dragged down from ~300ms to under 174ms. The cause is
+reversals per 30s at 87ms RTT against the old build's 4.0, with ball correction
+29.6 against 2.4 — a cliff dragged down from ~150ms to under 87ms. The cause is
 the same geometry read forwards: a quicker ball gives the opponent less time to
 reach the interception, so their paddle is still *moving* when it arrives, and a
 moving far paddle is exactly what this client cannot predict.
@@ -539,3 +557,25 @@ The whole funnel is logged to `events`: `launch`, `referrer_present`,
 `match_started`, `match_completed`, `disconnect`, `reconnected`,
 `share_tapped`, `share_message_sent`, `share_message_failed`,
 `rematch_tapped`. Without these the project is unfalsifiable.
+
+`netcode_sample` is one row per player per match (see
+`client/src/net/netcodeSampler.ts`). Read it in this order:
+
+- **`rttMean` first, then `pendingMean`.** Unacked inputs are the round trip
+  *plus* any backlog, and only the first is the network's: the server consumes
+  one input per tick and the client sends one per tick, so a queue that gets
+  deep stays deep for the rest of the match. `pendingMean - rttMean / 33.3` is
+  the backlog. Neither figure floors at zero: the ack rides a patch, so
+  `rttMean` carries up to one 33ms broadcast interval on top of the link, and
+  a bot match at 0ms injected latency measures `rtt` ~74, `pending` 2.2-2.6
+  and `leadMs` 74-86.
+- **`leadMsMean` is what the player feels as a late score**, and how far past
+  the far-paddle cliff (~129ms RTT) the match ran.
+- **The correction split, not `correctionMax`.** The pose mixes positions with
+  velocities, so a mispredicted bounce reports up to twice the ball's speed and
+  reads like a teleport. `ballVelCorrMax` says it was a reversal,
+  `ballCorrMax` says how far the ball actually moved, and `selfPaddleCorrMax`
+  must stay ~0 — anything else is a real desync.
+- `driftEma*` and `driftPeakMax` are computed on every device, not only the
+  ones with the overlay on — that is what `warnOnDivergence` buys, and rows
+  written before it was set report a hard-coded zero.
