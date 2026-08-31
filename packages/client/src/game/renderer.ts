@@ -221,6 +221,33 @@ const BOTTOM_ARC_CY = BOTTOM_PLANE_Y - PADDLE_BULGE + PADDLE_ARC_R;
 const TOP_ARC_CY = TOP_PLANE_Y + PADDLE_BULGE - PADDLE_ARC_R;
 
 /**
+ * Trace and stroke one paddle face at whatever `lineWidth` / `globalAlpha` the
+ * caller has already set.
+ *
+ * Module scope rather than a closure inside {@link drawPaddleArc}: it is
+ * called up to twice per paddle per frame at 120fps, and the rest of the frame
+ * path — down to `game/feedback.ts` handing back a shared empty cue object —
+ * is careful not to allocate there either.
+ */
+function strokeFace(
+  context: CanvasRenderingContext2D,
+  centreX: number,
+  centreY: number,
+  radius: number,
+  base: number,
+): void {
+  context.beginPath();
+  context.arc(
+    centreX,
+    centreY,
+    radius,
+    base - PADDLE_ARC_HALF_ANGLE,
+    base + PADDLE_ARC_HALF_ANGLE,
+  );
+  context.stroke();
+}
+
+/**
  * Draw one paddle as the arc the ball actually bounces off.
  *
  * Stroked rather than filled, at `PADDLE_ARC_R - PADDLE_THICKNESS / 2`: a
@@ -255,30 +282,18 @@ function drawPaddleArc(
   const radius = (PADDLE_ARC_R - PADDLE_THICKNESS / 2) * scale;
   const base = faceUp ? -Math.PI / 2 : Math.PI / 2;
 
-  const strokeFace = () => {
-    context.beginPath();
-    context.arc(
-      centreX,
-      centreY,
-      radius,
-      base - PADDLE_ARC_HALF_ANGLE,
-      base + PADDLE_ARC_HALF_ANGLE,
-    );
-    context.stroke();
-  };
-
   context.lineCap = 'round';
 
   if (glow > 0) {
     const alpha = context.globalAlpha;
     context.globalAlpha = alpha * glow * 0.45;
     context.lineWidth = PADDLE_THICKNESS * scale * (1 + 2.5 * glow);
-    strokeFace();
+    strokeFace(context, centreX, centreY, radius, base);
     context.globalAlpha = alpha;
   }
 
   context.lineWidth = PADDLE_THICKNESS * scale;
-  strokeFace();
+  strokeFace(context, centreX, centreY, radius, base);
   // Put the cap back. `lineCap` is context state, not path state, and the only
   // other stroke in this file is the dashed centre line — which is drawn at the
   // TOP of the next frame, so a round cap left behind here would fatten every

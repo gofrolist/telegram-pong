@@ -168,14 +168,20 @@ export class MatchFeedback {
   }
 
   /**
-   * A predicted point did not happen — the far paddle saved it after all.
+   * A predicted point did not happen — a paddle saved it after all.
    *
    * The wash is retracted; the buzz cannot be, and is deliberately not
-   * apologised for with a second one. This only ever fires above the round
-   * trip at which the adapter stops predicting far-plane events at all
-   * (`FAR_EVENT_RTT_CEILING_MS`), and above it the honest reading is that the
-   * device could not have known — a corrective buzz would just be a second
-   * wrong signal on top of the first.
+   * apologised for with a second one — a corrective buzz would just be a
+   * second wrong signal on top of the first.
+   *
+   * This is a BELOW-the-cliff path only. Above
+   * `EVENT_PREDICTION_RTT_CEILING_MS` no point is predicted at either plane,
+   * so none can be rejected; a nonzero `rejectedPoints` on a slow link means
+   * the gate is not doing what it says. Under the cliff the usual source is a
+   * far-plane point (one of MINE) that the opponent's paddle turned out to
+   * reach, and it is rare there — that is the latency band where the harness
+   * measures zero mispredicted far reversals, not a band where it measures
+   * few.
    */
   pointRejected(): void {
     this.pointAt = 0;

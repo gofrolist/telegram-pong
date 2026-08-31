@@ -487,16 +487,37 @@ increases, a hit when `meta.rallyHits` does. `confirm()` returning zero means
 the server saw an event this client never predicted, and the cue is played then
 instead, flagged as the late one.
 
-**The near plane predicts at every latency; the far plane only under the
-cliff.** This is the same ~129ms figure from the section above, read as a
-policy instead of a description, and it is the one place this build
-deliberately diverges from the demo it copied. The ball keeps being predicted
-through the opponent's paddle either way — declining to do that was measured
-and reverted. What is gated is the discrete *feedback*, because the two fail
-differently: a ball that curves the wrong way for 65ms eases itself out, and a
-haptic buzz for a point the far paddle turns out to have saved cannot be taken
-back. So the ball takes the bet and the buzz does not, and above the cliff the
-far-plane cue simply arrives with the server's word for it.
+**Above the cliff, the far paddle's hits and *every* point wait for the
+server; the near paddle's hits do not.** This is the same ~129ms figure from
+the section above, read as a policy instead of a description, and it is the
+one place this build deliberately diverges from the demo it copied. The ball
+keeps being predicted through the opponent's paddle either way — declining to
+do that was measured and reverted. What is gated is the discrete *feedback*,
+because the two fail differently: a ball that curves the wrong way for 65ms
+eases itself out, and a haptic buzz for a point the far paddle turns out to
+have saved cannot be taken back. So the ball takes the bet and the buzz does
+not, and above the cliff the withheld cue simply arrives with the server's
+word for it.
+
+**Points are gated at both planes, and that is not the obvious line.** A point
+of mine is the far paddle's business and gating it needs no argument. A point
+of *theirs* — the ball going past my own paddle — looks like it should be safe,
+because my paddle is driven by my own inputs and reconciles to zero error. It
+is not: the ball arriving at my plane came off *their* paddle, so above the
+cliff it carries that bounce's error all the way down the field (~29 units,
+measured below) and can be predicted to sail past a paddle it actually hit.
+Predicting it bought ~one RTT of earliness and paid for it with a warning
+buzz, an opponent-tinted wash, and a retraction ~333ms later when the
+channel's grace expired. Above the cliff, the score now only ever moves on the
+server's word.
+
+Near-plane *hits* stay predicted at every latency, inheriting the same error
+and occasionally wrong in the same way. The asymmetry is deliberate: a hit is
+a light tap, and a wrong one costs a phantom tap or a late tap, against a
+point's buzz-plus-wash-plus-retraction — and that tap is what keeps the paddle
+feeling connected to the hand exactly where the link is worst. It is also why
+the hit channel has no reject path: nothing on it is loud enough to be worth
+taking back.
 
 **The score numerals stay authoritative.** The demo hides its puck and
 celebrates optimistically; this does not, for the same asymmetry. A wrong buzz
@@ -534,9 +555,11 @@ not a near-plane regression, and an assertion that calls it one is an
 instrument fault of the kind this README already has a section about.
 
 `predictedHits` / `lateHits` / `rejectedPoints` ride home in the end-of-match
-netcode sample. They are the far-plane misprediction rate *as the player felt
-it*, which the correction columns do not capture: a build that quietly stopped
-predicting events would look identical in every one of them.
+netcode sample. They are the misprediction rate *as the player felt it*, which
+the correction columns do not capture: a build that quietly stopped predicting
+events would look identical in every one of them. `rejectedPoints` should now
+be zero on any match played above the cliff — nothing is predicted up there to
+reject — so a nonzero one on a slow link is the gate failing, not the network.
 
 [air-hockey demo]: https://github.com/colyseus/air-hockey-demo
 

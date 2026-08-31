@@ -22,7 +22,7 @@
 import { Predict, type Room } from '@colyseus/sdk';
 import {
   DIVERGENCE_TOLERANCE,
-  FAR_EVENT_RTT_CEILING_MS,
+  EVENT_PREDICTION_RTT_CEILING_MS,
   PREDICTION_SMOOTH_MS,
   SIDE_BOTTOM,
   SIDE_TOP,
@@ -266,8 +266,8 @@ export interface PredictionHandle {
  *    never will (see {@link MatchEventSink.pointRejected}).
  *  - `predicted: false` — the server reported an event this client never
  *    predicted, so the cue is being played now instead, ~RTT late. Above
- *    {@link FAR_EVENT_RTT_CEILING_MS} this is the normal path for anything at
- *    the opponent's end of the field.
+ *    {@link EVENT_PREDICTION_RTT_CEILING_MS} this is the normal path for hits
+ *    at the opponent's end of the field and for points at BOTH ends.
  *
  * The sink is called from inside the reconciler's step and from the frame
  * loop, so every implementation must be cheap and must not throw.
@@ -283,8 +283,11 @@ export interface MatchEventSink {
   point(scorer: Side, predicted: boolean): void;
   /**
    * A predicted point turned out not to have happened: the server ran the
-   * very timeline that predicted it and stayed silent, so the far paddle
-   * reached the ball after all. Undo whatever `point(..., true)` started.
+   * very timeline that predicted it and stayed silent, so a paddle reached
+   * the ball after all. Undo whatever `point(..., true)` started.
+   *
+   * Only reachable below {@link EVENT_PREDICTION_RTT_CEILING_MS} — above it
+   * no point is predicted, so none can be taken back.
    */
   pointRejected(): void;
 }
@@ -372,17 +375,18 @@ export async function attachPrediction(
     : null;
 
   /**
-   * Whether far-plane events are predicted this frame.
+   * Whether the link is fast enough to predict the events it gates.
    *
    * Sampled once per frame in `frame()` rather than read inside the step: the
    * step runs dozens of times per reconcile and must stay a straight line of
    * arithmetic, and a branch that could flip *between* a live step and its
    * replays is a determinism smell even where it happens to be harmless.
    *
-   * See {@link FAR_EVENT_RTT_CEILING_MS} for why the near plane is
-   * unconditional and the far one is not.
+   * See {@link EVENT_PREDICTION_RTT_CEILING_MS} for what it gates — far-plane
+   * hits and points at either plane — and why the near-plane HIT is the one
+   * cue that stays unconditional.
    */
-  let predictFarEvents = true;
+  let belowEventCliff = true;
 
   /**
    * The input handle is the ONLY thing that stages and sends.
@@ -496,7 +500,7 @@ export async function attachPrediction(
         // down came off the top. `MIN_VERTICAL_RATIO` guarantees it is never
         // exactly zero. Cheaper and more robust than re-deriving the contact.
         const struck: Side = view.ball.vy < 0 ? SIDE_BOTTOM : SIDE_TOP;
-        if (struck === mySide || predictFarEvents) ctx.predict(hits, struck);
+        if (struck === mySide || belowEventCliff) ctx.predict(hits, struck);
       }
 
       const scored: Side | null =
@@ -505,13 +509,13 @@ export async function attachPrediction(
           : view.meta.scoreTop > topScoreBefore
             ? SIDE_TOP
             : null;
-      if (scored !== null) {
-        // The plane the ball crossed belongs to the side that did NOT score,
-        // so a point of MINE is the far-plane one — it is their paddle that
-        // had the chance to stop it, and their paddle this client cannot know.
-        const nearPlane = scored !== mySide;
-        if (nearPlane || predictFarEvents) ctx.predict(points, scored);
-      }
+      // Points are gated as one, without asking which plane the ball
+      // crossed. A point of MINE is the far-plane one — their paddle had the
+      // chance to stop it, and their paddle this client cannot know — but a
+      // point of THEIRS is only as sound as the far bounce that sent the ball
+      // down here, so above the cliff both are guesses and only one of them
+      // looks like it should not be. See `EVENT_PREDICTION_RTT_CEILING_MS`.
+      if (scored !== null && belowEventCliff) ctx.predict(points, scored);
     },
   });
 
@@ -534,9 +538,10 @@ export async function attachPrediction(
    *
    * `confirm()` returning 0 means nothing was pending — the server saw an
    * event this client never predicted. That is not an error and it is not
-   * rare: it is precisely what happens at the far plane above
-   * {@link FAR_EVENT_RTT_CEILING_MS}, where the prediction is deliberately
-   * withheld. The cue is played now instead, flagged as the late delivery.
+   * rare: above {@link EVENT_PREDICTION_RTT_CEILING_MS} it is the only path
+   * left for a far-plane hit and for EVERY point, where the prediction is
+   * deliberately withheld. The cue is played now instead, flagged as the late
+   * delivery.
    */
   function settleAgainstServer(): void {
     if (!events || !hits || !points) return;
@@ -571,9 +576,10 @@ export async function attachPrediction(
     frame(desiredTargetX: number, now: number): void {
       const target = sanitizeTargetX(desiredTargetX);
 
-      // Decide the far-plane policy for the steps this frame is about to run,
-      // before any of them run. One clock read, not one per replayed tick.
-      predictFarEvents = room.clock.smoothedRtt() < FAR_EVENT_RTT_CEILING_MS;
+      // Decide the event-prediction policy for the steps this frame is about
+      // to run, before any of them run. One clock read, not one per replayed
+      // tick.
+      belowEventCliff = room.clock.smoothedRtt() < EVENT_PREDICTION_RTT_CEILING_MS;
 
       // How many fixed input steps are due this frame. On a 120 Hz phone this
       // is usually 0 and occasionally 1; on a stuttering one it may be 2 or 3.
@@ -590,8 +596,12 @@ export async function attachPrediction(
         input.send();
       }
 
-      // AFTER the steps, so a point predicted by this very frame is already
-      // pending when the server's confirmation for the previous one arrives.
+      // AFTER the steps, and the order is load-bearing in exactly one
+      // direction: when the server's version of an event lands in the same
+      // frame the local sim finally reaches it, predicting first leaves an
+      // entry for `confirm()` to settle, so the cue fires once. Settling
+      // first would report the event LATE and then predict it again — the
+      // double buzz the channels exist to prevent.
       settleAgainstServer();
     },
 

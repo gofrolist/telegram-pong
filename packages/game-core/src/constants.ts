@@ -214,8 +214,8 @@ export const OPEN_ROOM_TTL_MS = 60 * 60 * 1000;
 export const RECONNECT_GRACE_SEC = 30;
 
 /**
- * Round trip, in ms, above which the client stops predicting events at the
- * FAR paddle's plane and waits to be told about them instead.
+ * Round trip, in ms, above which the client stops predicting the discrete
+ * events it cannot know and waits to be told about them instead.
  *
  * This is the cliff from the README's "What the far paddle costs", read as a
  * policy rather than as a description. The opponent's paddle crosses its own
@@ -230,12 +230,34 @@ export const RECONNECT_GRACE_SEC = 30;
  * gates is only the discrete FEEDBACK: a haptic buzz for a point that turns
  * out not to have been scored cannot be taken back, whereas a ball that
  * curves the wrong way for 65ms eases itself out. So the ball takes the bet
- * and the buzz does not, and on a slow link the far-plane cue simply arrives
- * with the server's own word for it, one round trip later.
+ * and the buzz does not, and on a slow link the cue simply arrives with the
+ * server's own word for it, one round trip later.
  *
- * Events at the NEAR plane — the local player's own paddle, and the ball
- * going past it — are predicted at every latency. Those are driven by inputs
- * this client has, and have never produced a mispredicted reversal at any
- * latency tested.
+ * Above the ceiling two things are withheld, and the second is not about the
+ * far paddle's plane at all:
+ *
+ *  - HITS at the far paddle, whose reversal is the coin flip described above.
+ *  - POINTS at EITHER plane. The ball arriving at my own plane came off the
+ *    far paddle, so above the cliff it carries that bounce's error down the
+ *    field — measured at up to ~29 units by
+ *    `prediction.integration.test.ts` — and can be predicted to sail past a
+ *    paddle it actually hit. Predicting that buys ~RTT of earliness and pays
+ *    for it with a warning buzz, an opponent-tinted wash, and a retraction
+ *    ~333ms later when the channel's grace expires. So the near plane is not
+ *    exempt: above the cliff no point is predicted anywhere, and every point
+ *    arrives on the server's word.
+ *
+ * HITS at the near paddle stay predicted at every latency, and the asymmetry
+ * with points is deliberate rather than an oversight of the same error. They
+ * inherit that same far-bounce error and can be wrong in the same way, but a
+ * hit is a light tap that costs a phantom or a late tap when it is wrong,
+ * against a point's buzz-plus-wash-plus-retraction — and the near tap is what
+ * keeps the paddle feeling connected to the hand exactly where the link is
+ * worst. It is also why the hit channel has no reject path at all: nothing
+ * there is loud enough to be worth taking back.
+ *
+ * Rejections therefore all come from BELOW the cliff, where both planes are
+ * predicted and the opponent can still occasionally save a ball this client
+ * had already scored. They are counted in `rejectedPoints`.
  */
-export const FAR_EVENT_RTT_CEILING_MS = 129;
+export const EVENT_PREDICTION_RTT_CEILING_MS = 129;

@@ -321,6 +321,21 @@ describe('prediction under 150ms RTT', () => {
     expect(deliveredHits.some((event) => event.predicted)).toBe(true);
     expect(nearHits.length).toBeGreaterThan(0);
 
+    // No point is predicted at this latency, at EITHER plane. 150ms RTT is
+    // past the 129ms ceiling, so the gate should have withheld every point —
+    // including the near-plane ones, which look safe (our own paddle is exact,
+    // `selfPaddleCorrection` is 0.000) and are not: the ball reaching our
+    // plane came off the far paddle and carries that bounce's error down the
+    // field. See `EVENT_PREDICTION_RTT_CEILING_MS`.
+    //
+    // Written as a filter rather than a count because a rally of this length
+    // often ends without conceding at all — the run this was written against
+    // logs `points=0`. That makes the assertion vacuous on those runs and
+    // load-bearing on the ones where a point does land, which is the right
+    // trade against a flaky `toBeGreaterThan(0)` on an event the harness
+    // cannot make happen on demand.
+    expect(delivered.filter((event) => event.kind === 'point' && event.predicted)).toEqual([]);
+
     // NOT asserted: that every near-plane hit is predicted.
     //
     // It is the overwhelming majority — the run this was written against goes

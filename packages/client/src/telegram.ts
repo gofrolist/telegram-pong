@@ -208,8 +208,13 @@ export function closeMiniApp(): void {
 
 /** The ball came off a paddle. `heavy` for your own, `soft` for theirs. */
 export function hapticBallStruck(mine: boolean): void {
-  if (!hapticFeedback.impactOccurred.isAvailable()) return;
   try {
+    // The probe is INSIDE the try with the call. `isAvailable` is a signal,
+    // not a plain boolean, and these run synchronously inside the reconciler's
+    // step — an exception here would unwind through `input.send()` and abandon
+    // the frame's prediction half-done, which is a far worse outcome than a
+    // missed buzz.
+    if (!hapticFeedback.impactOccurred.isAvailable()) return;
     hapticFeedback.impactOccurred(mine ? 'medium' : 'soft');
   } catch {
     // A host that advertises the method and then rejects it is not worth
@@ -219,8 +224,8 @@ export function hapticBallStruck(mine: boolean): void {
 
 /** A point was scored. */
 export function hapticPointScored(mine: boolean): void {
-  if (!hapticFeedback.notificationOccurred.isAvailable()) return;
   try {
+    if (!hapticFeedback.notificationOccurred.isAvailable()) return;
     hapticFeedback.notificationOccurred(mine ? 'success' : 'warning');
   } catch {
     // As above.
