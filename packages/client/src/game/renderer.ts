@@ -83,6 +83,56 @@ const THUMB_RESERVE_PX = 56;
  */
 const MIN_TOP_GAP_PX = 8;
 
+/**
+ * Where the two score numerals sit, in field units, and the em size they are
+ * drawn at.
+ *
+ * Exported through `computeOverlayAnchors` rather than kept local because the
+ * waiting overlay is DOM, not canvas, and it has to lay itself out around
+ * numerals it cannot see. Anything that moves a score has to move both.
+ */
+const SCORE_TOP_CY = FIELD_H * 0.3;
+const SCORE_BOTTOM_CY = FIELD_H * 0.7;
+const SCORE_FONT = 22;
+
+/**
+ * Canvas-relative CSS pixels of the things a DOM overlay has to avoid.
+ *
+ * The overlay covers the whole canvas, but the field inside it is letterboxed
+ * by `computeViewport`, so a percentage of the overlay is not a position on
+ * the field. These are the real ones.
+ */
+export interface OverlayAnchors {
+  /** Top of the upper numeral's ink. */
+  scoreTop: number;
+  /** The dashed centre line. */
+  centreLine: number;
+  /** Top of the lower numeral's ink. */
+  bottomScoreTop: number;
+}
+
+/**
+ * How far a digit's cap rises above the numeral's middle, in ems.
+ *
+ * The numerals are drawn with `textBaseline: 'middle'`, so half an em is the
+ * top of the *box* — and on a numeral that tall the box overstates the ink by
+ * a visible margin. system-ui digits run to about 0.36em above the middle;
+ * 0.4 is rounded up, because the overlay above has barely more room than it
+ * needs on a 320px phone and an anchor that guesses low would put a title on
+ * top of a score.
+ */
+const SCORE_CAP_RISE = 0.4;
+
+export function computeOverlayAnchors(viewport: Viewport): OverlayAnchors {
+  const { offsetY, scale } = viewport;
+  const rise = SCORE_FONT * SCORE_CAP_RISE;
+  return {
+    scoreTop: offsetY + (SCORE_TOP_CY - rise) * scale,
+    centreLine: offsetY + (FIELD_H / 2) * scale,
+    bottomScoreTop: offsetY + (SCORE_BOTTOM_CY - rise) * scale,
+  };
+}
+
 export function computeViewport(cssWidth: number, cssHeight: number): Viewport {
   const scale = Math.min(cssWidth / FIELD_W, cssHeight / FIELD_H);
 
@@ -234,9 +284,9 @@ export function draw(
   context.fillStyle = theme.text;
   context.textAlign = 'center';
   context.textBaseline = 'middle';
-  context.font = `700 ${Math.round(22 * scale)}px system-ui, -apple-system, sans-serif`;
-  context.fillText(String(frame.scoreOpponent), offsetX + (FIELD_W / 2) * scale, offsetY + FIELD_H * 0.3 * scale);
-  context.fillText(String(frame.scoreSelf), offsetX + (FIELD_W / 2) * scale, offsetY + FIELD_H * 0.7 * scale);
+  context.font = `700 ${Math.round(SCORE_FONT * scale)}px system-ui, -apple-system, sans-serif`;
+  context.fillText(String(frame.scoreOpponent), offsetX + (FIELD_W / 2) * scale, offsetY + SCORE_TOP_CY * scale);
+  context.fillText(String(frame.scoreSelf), offsetX + (FIELD_W / 2) * scale, offsetY + SCORE_BOTTOM_CY * scale);
   context.globalAlpha = frame.dimmed ? 0.35 : 1;
 
   // Paddles. `self` is whichever paddle the local player steers — after the
