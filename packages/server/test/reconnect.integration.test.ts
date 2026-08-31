@@ -315,4 +315,89 @@ describe('asynchronous invites', () => {
     await roomA2.leave(true);
     await roomB.leave(true);
   }, 90_000);
+
+  /**
+   * The same story, told the way a phone tells it.
+   *
+   * The test above passes and always did, because it leaves with
+   * `leave(true)` — a CONSENTED leave, which routes straight through
+   * `onLeave`, frees the seat and never touches `allowReconnection`. Nobody
+   * closes an app that politely. A backgrounded Mini App drops the socket, and
+   * that is `leave(false)`: `onDrop`, and a seat held for the full 30-second
+   * grace.
+   *
+   * Two defects lived in that gap, both recovered from this deployment's own
+   * `events` table:
+   *
+   *   `SHDR9TWQ` — the guest took the invite and disconnected in the SAME
+   *   SECOND; the host arrived 43 minutes later to an empty table.
+   *
+   *   `PK29NHH8` — the host was quicker, ten seconds, so `players.size === 2`
+   *   held, the match "started" against a seat whose occupant had already
+   *   gone, and 31 seconds later it was written as a real 0-0 disconnect.
+   *
+   * Underneath both: `maxClients = 2`, and Colyseus LOCKS a room at capacity.
+   * A held seat still counts, so the returning player's `joinById` was
+   * rejected outright with `MatchMakeError: room is locked`.
+   */
+  it('lets the host back in after the guest drops without consent', async () => {
+    const hostToken = await authenticate(8003, 'Host');
+    const guestToken = await authenticate(8004, 'Guest');
+    const roomId = await openRoom(hostToken);
+
+    const hostClient = new sdk.Client(BASE);
+    const guestClient = new sdk.Client(BASE);
+    hostClient.auth.token = hostToken;
+    guestClient.auth.token = guestToken;
+
+    // The host opens the room, shares the invite and the app goes to sleep.
+    const hostRoom = await hostClient.joinById(roomId, { token: hostToken }, stateModule.PongState);
+    await waitFor('host seated', () => hostRoom.state.players.size === 1);
+    await hostRoom.leave(false);
+
+    // The guest takes the invite, sees an empty table, and their app sleeps
+    // too — within one second, in the room this is reconstructed from.
+    const guestRoom = await guestClient.joinById(roomId, { token: guestToken }, stateModule.PongState);
+    await waitFor('guest seated', () => guestRoom.state.players.size >= 1);
+    await guestRoom.leave(false);
+
+    // The host returns inside what WAS the guest's grace period. This line is
+    // the whole test: it used to throw `room is locked`.
+    const hostAgain = await hostClient.joinById(roomId, { token: hostToken }, stateModule.PongState);
+    await waitFor('host back in', () => hostAgain.state.players.size >= 1);
+
+    // And no match may start against the ghost still nominally in the seat.
+    await sleep(3000);
+    expect(hostAgain.state.meta.phase).toBe(gameCore.Phase.WAITING);
+    expect(hostAgain.state.meta.endReason).toBe(gameCore.EndReason.NONE);
+
+    await hostAgain.leave(true);
+  }, 90_000);
+
+  /**
+   * The other half. A fix that made the room cautious enough never to start
+   * would satisfy the test above and break the product.
+   */
+  it('still starts at once when both players are really there', async () => {
+    const tokenA = await authenticate(8005, 'Ada');
+    const tokenB = await authenticate(8006, 'Grace');
+    const roomId = await openRoom(tokenA);
+
+    const clientA = new sdk.Client(BASE);
+    const clientB = new sdk.Client(BASE);
+    clientA.auth.token = tokenA;
+    clientB.auth.token = tokenB;
+
+    const roomA = await clientA.joinById(roomId, { token: tokenA }, stateModule.PongState);
+    const roomB = await clientB.joinById(roomId, { token: tokenB }, stateModule.PongState);
+
+    await waitFor(
+      'match starts',
+      () => roomA.state.meta.phase !== gameCore.Phase.WAITING,
+      20_000,
+    );
+
+    await roomA.leave(true);
+    await roomB.leave(true);
+  }, 90_000);
 });

@@ -52,7 +52,7 @@ import { config } from '../config.js';
 import { PongInput, PongState, PlayerInfo } from '@pong/game-core/net';
 import { recordEvent } from '../analytics.js';
 import { finishMatch, markRoomFilled, markRoomStatus } from '../matchWriter.js';
-import { notifyOpponentWaiting } from '../telegram/notify.js';
+import { notifyHostReturned, notifyOpponentWaiting } from '../telegram/notify.js';
 import { verifySessionToken, type SessionToken } from '../telegram/initData.js';
 import { TraceRecorder } from '../antiCheat/traceRecorder.js';
 
@@ -142,8 +142,17 @@ export class PongRoom extends Room<PongRoomType> {
   private startedAt = 0;
   private longestRally = 0;
   private matchWritten = false;
+  /** Set the first time both players were connected at once. See `endMatch`. */
+  private bothWereConnected = false;
   /** Set the first time a non-host takes the open slot. */
   private guestArrived = false;
+  /**
+   * Whether the guest has already been called back once.
+   *
+   * A latch, not a counter: the host may bounce in and out of a waiting room
+   * several times, and each bounce must not become another message.
+   */
+  private hostReturnNotified = false;
   private disposeTimer: NodeJS.Timeout | null = null;
   private trace!: TraceRecorder;
 
@@ -271,9 +280,54 @@ export class PongRoom extends Room<PongRoomType> {
       }
     }
 
-    if (this.state.players.size === 2 && this.state.meta.phase === Phase.WAITING) {
+    // `everyoneConnected()`, not `players.size === 2`. A player inside their
+    // 30-second reconnect grace still HOLDS a seat with `connected: false`, so
+    // the size test starts a match against someone who has already gone — and
+    // then the grace expires and the match dies 0-0 by disconnect.
+    //
+    // That is not hypothetical, it is in this deployment's own telemetry.
+    // Room `PK29NHH8`: a guest took the invite and dropped in the same second,
+    // the host tapped the notification ten seconds later, the match "started"
+    // against an empty seat and was written as a 0-0 disconnect 31 seconds
+    // afterwards — into both players' totals, win rates and head-to-head. The
+    // host's experience is tapping "Join the match" and landing in a finished
+    // game.
+    if (this.everyoneConnected() && this.state.meta.phase === Phase.WAITING) {
       this.beginMatch();
+      return;
     }
+
+    // Someone is here and the other seat is empty or still dropped. If the
+    // person now arriving is the HOST and a guest has already been and gone,
+    // call the guest back: they are the half of this handshake that has never
+    // been notified of anything. See `notifyHostReturned`.
+    if (
+      auth.userId === this.options.hostUserId &&
+      this.guestArrived &&
+      !this.hostReturnNotified &&
+      !this.matchStarted()
+    ) {
+      const guestUserId = this.guestUserId();
+      if (guestUserId !== null && !this.isUserConnected(guestUserId)) {
+        this.hostReturnNotified = true;
+        void notifyHostReturned(guestUserId, this.state.roomCode, this.options.hostUserId);
+      }
+    }
+  }
+
+  /** The non-host who took the open seat, if anyone has. */
+  private guestUserId(): number | null {
+    for (const [userId] of this.sideByUser) {
+      if (userId !== this.options.hostUserId) return userId;
+    }
+    return null;
+  }
+
+  private isUserConnected(userId: number): boolean {
+    for (const [, info] of this.state.players) {
+      if (info.userId === String(userId) && info.connected) return true;
+    }
+    return false;
   }
 
   /** Is the room's host currently in the room? */
@@ -320,7 +374,27 @@ export class PongRoom extends Room<PongRoomType> {
       props: { phase: this.state.meta.phase },
     });
 
-    if (matchLive) this.startReconnectCountdown();
+    if (!matchLive) {
+      // NO seat is held for a drop that happens before the match starts, and
+      // this is load-bearing rather than an optimisation.
+      //
+      // `maxClients = 2`, and Colyseus LOCKS a room once its seats are taken.
+      // A seat held through `allowReconnection` still counts, so holding one
+      // for a player who is sitting on a waiting screen makes the room reject
+      // the other player's `joinById` outright — `MatchMakeError: room is
+      // locked` — for the full grace period. That is precisely the window in
+      // which the two of them are trying to find each other: guest taps the
+      // invite and leaves, host reads the notification and returns 20 seconds
+      // later, and the door is bolted from the inside by a ghost.
+      //
+      // There is also nothing to preserve. A waiting screen holds no match
+      // state, `sideByUser` already survives the leave, so a returning player
+      // is re-seated on the same end. Letting the seat go costs nothing and
+      // unlocks the room immediately.
+      return;
+    }
+
+    this.startReconnectCountdown();
 
     try {
       await this.allowReconnection(client, RECONNECT_GRACE_SEC);
@@ -328,7 +402,7 @@ export class PongRoom extends Room<PongRoomType> {
     } catch {
       // The grace period elapsed. The player who stayed takes the match.
       this.stopReconnectCountdown();
-      if (info && matchLive) {
+      if (info) {
         const side = this.sideBySession.get(client.sessionId);
         const winnerSide: Side | null =
           side === undefined ? null : side === SIDE_BOTTOM ? SIDE_TOP : SIDE_BOTTOM;
@@ -493,6 +567,10 @@ export class PongRoom extends Room<PongRoomType> {
   }
 
   private beginMatch(): void {
+    // Only reached via `everyoneConnected()`, so this is the moment both
+    // players were provably present. `endMatch` refuses to write a result
+    // without it.
+    this.bothWereConnected = true;
     this.startedAt = Date.now();
     startMatch(this.world(), this.seed, SIDE_BOTTOM);
     this.trace.reset();
@@ -531,6 +609,16 @@ export class PongRoom extends Room<PongRoomType> {
     const topUser = this.userIdForSide(SIDE_TOP);
     if (bottomUser === null || topUser === null) {
       // A room that never filled has no match to write.
+      return;
+    }
+
+    // Nor does a room that filled on paper but never had both people present
+    // at the same moment. Before `everyoneConnected()` gated `beginMatch`,
+    // these were written as real 0-0 results: they counted in both players'
+    // match totals, moved their win rates and created a head-to-head row for a
+    // game neither of them played. `bothWereConnected` is set by `beginMatch`,
+    // which now only runs when they genuinely were.
+    if (!this.bothWereConnected) {
       return;
     }
 

@@ -22,6 +22,9 @@ interface Dictionary {
   startPlay: string;
   opponentWaiting: (name: string) => string;
   opponentWaitingButton: string;
+  /** Sent to the GUEST when the host comes back to a room the guest has left. */
+  hostReturned: (name: string) => string;
+  hostReturnedButton: string;
   rematchButton: string;
   playButton: string;
   /** Title of the invite in Telegram's share picker. */
@@ -38,8 +41,10 @@ const en: Dictionary = {
   start:
     'Pong. Two players, one ball, no bots.\n\nTap Play, then share the invite into any chat — whoever taps it first is your opponent.',
   startPlay: 'Play',
-  opponentWaiting: (name) => `${name} took your invite and is waiting in the room. Jump in.`,
-  opponentWaitingButton: 'Join the match',
+  opponentWaiting: (name) => `${name} took your invite. Open the room and they will get a nudge.`,
+  opponentWaitingButton: 'Open the room',
+  hostReturned: (name) => `${name} is at the table now. Your seat is still yours.`,
+  hostReturnedButton: 'Take your seat',
   rematchButton: 'Rematch',
   playButton: 'Play',
   inviteTitle: 'Pong — first to tap plays',
@@ -56,8 +61,10 @@ const ru: Dictionary = {
   start:
     'Понг. Двое игроков, один мяч, никаких ботов.\n\nНажмите «Играть» и отправьте приглашение в любой чат — соперником станет тот, кто нажмёт первым.',
   startPlay: 'Играть',
-  opponentWaiting: (name) => `${name} принял приглашение и ждёт в комнате. Заходите.`,
-  opponentWaitingButton: 'Войти в матч',
+  opponentWaiting: (name) => `${name} принял приглашение. Откройте комнату — ему придёт напоминание.`,
+  opponentWaitingButton: 'Открыть комнату',
+  hostReturned: (name) => `${name} за столом. Ваше место свободно.`,
+  hostReturnedButton: 'Занять место',
   rematchButton: 'Реванш',
   playButton: 'Играть',
   inviteTitle: 'Понг — играет тот, кто нажмёт первым',
