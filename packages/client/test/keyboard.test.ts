@@ -112,6 +112,34 @@ describe('PaddleKeyboard', () => {
     expect(keyboard.direction).toBe(0);
   });
 
+  it('leaves modified arrows to the browser, and never latches one', () => {
+    const keyboard = new PaddleKeyboard();
+    // Cmd+ArrowLeft is a back navigation, not a paddle move — and macOS sends
+    // no keyup for a plain key while Command is held, so claiming it would
+    // latch a direction nothing ever releases.
+    expect(keyboard.keyDown('ArrowLeft', false, true)).toBe(false);
+    expect(keyboard.direction).toBe(0);
+
+    // And a modifier pressed mid-travel releases the arrow rather than
+    // waiting for a keyup that may never come.
+    keyboard.keyDown('ArrowRight', false);
+    expect(keyboard.direction).toBe(1);
+    keyboard.keyDown('ArrowRight', true, true);
+    expect(keyboard.direction).toBe(0);
+  });
+
+  it('re-acquires a key the OS says is still down after a blur', () => {
+    const keyboard = new PaddleKeyboard();
+    keyboard.keyDown('ArrowRight', false);
+    // The window lost focus with the key held; the physical key never came up,
+    // so the only evidence it is still down is the auto-repeat.
+    keyboard.releaseAll();
+    expect(keyboard.keyDown('ArrowRight', true)).toBe(true);
+    expect(keyboard.direction).toBe(1);
+    // And it seeds from the paddle, as a fresh press does.
+    expect(keyboard.step(MAX_X, 30, FRAME, false)).toBeCloseTo(30 + PADDLE_MAX_SPEED * FRAME, 10);
+  });
+
   it('forgets everything when the window takes the focus away', () => {
     const keyboard = new PaddleKeyboard();
     keyboard.keyDown('ArrowRight', false);

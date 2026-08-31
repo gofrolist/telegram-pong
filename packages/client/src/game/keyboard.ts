@@ -45,14 +45,31 @@ export class PaddleKeyboard {
   private seed = false;
 
   /**
+   * @param modified  whether a modifier — Meta, Control or Alt — was down with
+   *   the key. Those combinations belong to the browser and the OS (back and
+   *   forward, word navigation, desktop switching), and claiming them is
+   *   actively dangerous rather than merely rude: macOS delivers no `keyup`
+   *   for a plain key while Command is held, so a claimed `Cmd+ArrowLeft`
+   *   latches a direction that nothing ever releases and the paddle drives
+   *   into the wall and stays there for the rest of the match.
    * @returns whether this was one of ours, and so whether the browser's own
    * handling of it — scrolling the page — should be prevented.
    */
-  keyDown(key: string, repeat: boolean): boolean {
+  keyDown(key: string, repeat: boolean, modified = false): boolean {
     const direction = directionOf(key);
     if (direction === 0) return false;
+    if (modified) {
+      // Not ours, and if the same arrow was already travelling, let it go: the
+      // `keyup` that would have stopped it may never arrive.
+      this.keyUp(key);
+      return false;
+    }
     // Claimed before the repeat check: the auto-repeats scroll the page too.
-    if (repeat) return true;
+    // A repeat for a direction we are NOT tracking is treated as a fresh
+    // press, though — that is the OS telling us the key is physically down
+    // after a blur released it, and dropping it leaves a held key dead until
+    // the player lets go and presses again.
+    if (repeat && this.held.includes(direction)) return true;
     if (this.held.length === 0) this.seed = true;
     if (!this.held.includes(direction)) this.held.push(direction);
     return true;

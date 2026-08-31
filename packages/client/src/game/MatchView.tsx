@@ -221,14 +221,25 @@ export function MatchView({
 
       // Held arrow keys, folded into the same target the finger writes — so
       // everything downstream, prediction included, sees one kind of input.
-      const dt = lastFrameAt === 0 ? 0 : (now - lastFrameAt) / 1000;
+      //
+      // Only while the room is actually simulating: `step` in the shared sim
+      // moves no paddle outside PLAYING and COUNTDOWN, so integrating a held
+      // key through the waiting screen or a reconnection pause would park the
+      // target at the wall against a paddle standing still — and the moment
+      // play resumed it would glide there with no key down, which is the exact
+      // failure the integration is built to avoid.
+      const simulating =
+        state.meta.phase === Phase.PLAYING || state.meta.phase === Phase.COUNTDOWN;
+      if (simulating) {
+        const dt = lastFrameAt === 0 ? 0 : (now - lastFrameAt) / 1000;
+        desiredXRef.current = keyboardRef.current.step(
+          desiredXRef.current,
+          selfPaddleX,
+          dt,
+          mirrored,
+        );
+      }
       lastFrameAt = now;
-      desiredXRef.current = keyboardRef.current.step(
-        desiredXRef.current,
-        selfPaddleX,
-        dt,
-        mirrored,
-      );
 
       // Send input and advance the reconciler. Even while paused: the adapter
       // needs a tick to keep its clock aligned, and the shared simulation
@@ -397,8 +408,12 @@ export function MatchView({
     const keyboard = keyboardRef.current;
 
     const onKeyDown = (event: KeyboardEvent) => {
-      // Arrows scroll the page otherwise, auto-repeats included.
-      if (keyboard.keyDown(event.key, event.repeat)) event.preventDefault();
+      // Arrows scroll the page otherwise, auto-repeats included. Modified
+      // arrows are left to the browser — see `keyDown`; swallowing a
+      // `Cmd+ArrowLeft` costs a back navigation AND latches a direction macOS
+      // never sends a `keyup` for.
+      const modified = event.metaKey || event.ctrlKey || event.altKey;
+      if (keyboard.keyDown(event.key, event.repeat, modified)) event.preventDefault();
     };
     const onKeyUp = (event: KeyboardEvent) => {
       keyboard.keyUp(event.key);

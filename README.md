@@ -672,7 +672,13 @@ target that ran ahead of the paddle would keep it gliding after the key came up,
 and one left parked inside a wall would make the first 200ms of the next press
 do nothing. The paddle's left is the *player's* left on both sides: the top
 player's view is mirrored, so their key direction is negated on the way in, the
-same way `pointerToFieldX` un-mirrors a touch.
+same way `pointerToFieldX` un-mirrors a touch. The integration runs only while
+the room is simulating — `step` moves no paddle outside `PLAYING` and
+`COUNTDOWN`, so a key held through the waiting screen or a reconnection pause
+would otherwise park the target at the wall and glide the paddle there the
+moment play resumed. Modified arrows (`Cmd`, `Ctrl`, `Alt`) are left to the
+browser, both because they are its shortcuts and because macOS sends no `keyup`
+for a plain key while `Cmd` is down.
 
 ### Asynchronous rooms
 
