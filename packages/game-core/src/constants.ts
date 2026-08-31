@@ -212,3 +212,30 @@ export const OPEN_ROOM_TTL_MS = 60 * 60 * 1000;
 
 /** Seconds a dropped player has to reconnect before forfeiting. */
 export const RECONNECT_GRACE_SEC = 30;
+
+/**
+ * Round trip, in ms, above which the client stops predicting events at the
+ * FAR paddle's plane and waits to be told about them instead.
+ *
+ * This is the cliff from the README's "What the far paddle costs", read as a
+ * policy rather than as a description. The opponent's paddle crosses its own
+ * 12.3-unit contact zone in `12.3 / 190 = 65ms` of one-way delay, so past
+ * ~129ms round trip whether the ball is coming back off it is genuinely
+ * unknowable on this device. Below the cliff the bot harness measures zero
+ * mispredicted far reversals; above it, 18-19 per 30s.
+ *
+ * The ball keeps being predicted through that plane either way — declining to
+ * predict it was measured and reverted, and the note in
+ * {@link PREDICTION_SMOOTH_MS} is what is left of that attempt. What this
+ * gates is only the discrete FEEDBACK: a haptic buzz for a point that turns
+ * out not to have been scored cannot be taken back, whereas a ball that
+ * curves the wrong way for 65ms eases itself out. So the ball takes the bet
+ * and the buzz does not, and on a slow link the far-plane cue simply arrives
+ * with the server's own word for it, one round trip later.
+ *
+ * Events at the NEAR plane — the local player's own paddle, and the ball
+ * going past it — are predicted at every latency. Those are driven by inputs
+ * this client has, and have never produced a mispredicted reversal at any
+ * latency tested.
+ */
+export const FAR_EVENT_RTT_CEILING_MS = 129;

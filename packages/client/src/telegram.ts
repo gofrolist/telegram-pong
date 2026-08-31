@@ -16,6 +16,7 @@ import {
   bindViewportCssVars,
   disableVerticalSwipes,
   expandViewport,
+  hapticFeedback,
   init,
   initDataRaw,
   initDataStartParam,
@@ -179,4 +180,49 @@ export function canSharePreparedMessage(): boolean {
 /** Close the Mini App. Used only by an explicit "exit" affordance. */
 export function closeMiniApp(): void {
   if (miniApp.close.isAvailable()) miniApp.close();
+}
+
+// ---------------------------------------------------------------------------
+// Haptics
+// ---------------------------------------------------------------------------
+
+/**
+ * Physical feedback for the two discrete things that happen in a rally.
+ *
+ * These are called from the prediction adapter's event channels, which means
+ * they fire at the moment the event is *predicted* — roughly one round trip
+ * before the server could have confirmed it. That is the entire point: a
+ * buzz that arrives 170ms after the ball left the paddle reads as the game
+ * being slow, and it is the one cue a player feels rather than sees, so it is
+ * also the one that cannot be hidden behind interpolation.
+ *
+ * Both are probed per call rather than once at startup. `hapticFeedback` is
+ * not a mountable component, so there is no state to cache, and a host that
+ * gained the capability mid-session (a Telegram update behind a suspended
+ * webview) would otherwise stay silent for the life of the page.
+ *
+ * Neither throws. A missing capability is a silent no-op, because every
+ * caller is on the render path and none of them has anything useful to do
+ * about a phone that cannot buzz.
+ */
+
+/** The ball came off a paddle. `heavy` for your own, `soft` for theirs. */
+export function hapticBallStruck(mine: boolean): void {
+  if (!hapticFeedback.impactOccurred.isAvailable()) return;
+  try {
+    hapticFeedback.impactOccurred(mine ? 'medium' : 'soft');
+  } catch {
+    // A host that advertises the method and then rejects it is not worth
+    // failing a frame over.
+  }
+}
+
+/** A point was scored. */
+export function hapticPointScored(mine: boolean): void {
+  if (!hapticFeedback.notificationOccurred.isAvailable()) return;
+  try {
+    hapticFeedback.notificationOccurred(mine ? 'success' : 'warning');
+  } catch {
+    // As above.
+  }
 }

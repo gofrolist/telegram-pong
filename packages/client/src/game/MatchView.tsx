@@ -23,6 +23,7 @@ import type { PongRoomHandle } from '../net/client.js';
 import { canSharePreparedMessage, sharePreparedMessage } from '../telegram.js';
 import { loadNetcodeOverlay } from '../debug/netcode.js';
 import { NetcodeSampler } from '../net/netcodeSampler.js';
+import { MatchFeedback } from './feedback.js';
 import {
   computeOverlayAnchors,
   draw,
@@ -112,6 +113,17 @@ export function MatchView({
    */
   const samplerRef = useRef<NetcodeSampler>(new NetcodeSampler());
 
+  /**
+   * Hits and points, as something the player can feel and see.
+   *
+   * At component scope for the same reason as the sampler: the frame loop
+   * drives it and the match-ended effect reads its tally. It is fed by the
+   * prediction adapter's event channels, so its cues land at the moment the
+   * simulation produced the event rather than one round trip later — see
+   * `MatchEventSink` in `net/predictionAdapter.ts`.
+   */
+  const feedbackRef = useRef<MatchFeedback>(new MatchFeedback(mySide));
+
   const [phase, setPhase] = useState<number>(Phase.WAITING);
   const [reconnectSeconds, setReconnectSeconds] = useState(0);
   const [opponentConnected, setOpponentConnected] = useState(true);
@@ -174,7 +186,7 @@ export function MatchView({
     // Attaching waits for the first decoded state patch, so the render loop
     // starts before prediction is live and simply draws the replicated
     // position until it is.
-    attachPrediction(room, mySide)
+    attachPrediction(room, mySide, { events: feedbackRef.current })
       .then((handle) => {
         if (!running) {
           handle.dispose();
@@ -219,6 +231,16 @@ export function MatchView({
       const selfScore = mySide === SIDE_BOTTOM ? state.meta.scoreBottom : state.meta.scoreTop;
       const opponentScore = mySide === SIDE_BOTTOM ? state.meta.scoreTop : state.meta.scoreBottom;
 
+      // The numerals stay AUTHORITATIVE while the cues run early, and the
+      // asymmetry is the point. A haptic for a point that the far paddle
+      // turns out to have saved is a wrong signal the player has already
+      // felt and forgotten; a score numeral that reads 4-3 and then goes
+      // back to 3-3 is a wrong signal they are still looking at. So the
+      // cheap-to-be-wrong half is predicted and the expensive half waits —
+      // and at a healthy lead the numeral is ~170ms behind the cue, which
+      // the README's `lead ms` column has always described as invisible.
+      const cues = feedbackRef.current.read();
+
       draw(
         context,
         viewport,
@@ -230,6 +252,10 @@ export function MatchView({
           scoreSelf: selfScore,
           scoreOpponent: opponentScore,
           mirrored,
+          bottomFlash: cues.bottomFlash,
+          topFlash: cues.topFlash,
+          pointFlash: cues.pointFlash,
+          pointFlashMine: cues.pointFlashMine,
           countdown:
             state.meta.phase === Phase.COUNTDOWN
               ? Math.ceil(state.meta.countdown / 30)
@@ -297,6 +323,12 @@ export function MatchView({
             matchId: state.matchId,
             props: {
               ...summary,
+              // How many cues arrived early and how many had to wait for the
+              // server. This is the far-plane misprediction rate as the
+              // player FELT it, which no correction figure captures: a build
+              // that quietly stopped predicting events would be identical in
+              // every other column here.
+              ...feedbackRef.current.summary(),
               // The two things that make the numbers comparable across
               // reports: which client drew them, and how far the player was
               // from the machine. Neither is derivable server-side.

@@ -50,6 +50,21 @@ export interface Frame {
   /** Countdown numeral to overlay, or 0 for none. */
   countdown: number;
   dimmed: boolean;
+  /**
+   * Transient cues, 0..1, from `game/feedback.ts`.
+   *
+   * They are field-side, not screen-side, for the same reason the paddle
+   * positions are: the mirror lives in this file and nowhere else, so a caller
+   * that had to know which end of the screen was "yours" would be a second
+   * place to get it wrong. Optional so the pre-prediction fallback frame in
+   * `MatchView` — drawn for the fraction of a second before the reconciler
+   * attaches — does not have to invent them.
+   */
+  bottomFlash?: number;
+  topFlash?: number;
+  pointFlash?: number;
+  /** Tints the point wash: the local player's colour, or the opponent's. */
+  pointFlashMine?: boolean;
 }
 
 /** Maps field units to device pixels, preserving the field's aspect ratio. */
@@ -221,6 +236,13 @@ const TOP_ARC_CY = TOP_PLANE_Y + PADDLE_BULGE - PADDLE_ARC_R;
  * `faceUp` is about the screen, not the field: the local player's paddle is
  * always the one at the bottom of their own screen, and its face always bulges
  * towards the middle, so the mirror flips which way each arc curves.
+ *
+ * `glow` (0..1) is a struck paddle, and it is drawn as a second, fatter stroke
+ * UNDER the bar rather than as a brighter bar. Widening the bar itself would
+ * put its outer edge past the contact radius for as long as the cue lasted,
+ * which is the one thing the geometry above is careful not to do: the player
+ * would be aiming at a surface the ball does not bounce off. A halo around a
+ * bar that has not moved says the same thing and lies about nothing.
  */
 function drawPaddleArc(
   context: CanvasRenderingContext2D,
@@ -228,21 +250,35 @@ function drawPaddleArc(
   centreY: number,
   scale: number,
   faceUp: boolean,
+  glow = 0,
 ): void {
   const radius = (PADDLE_ARC_R - PADDLE_THICKNESS / 2) * scale;
   const base = faceUp ? -Math.PI / 2 : Math.PI / 2;
 
-  context.lineWidth = PADDLE_THICKNESS * scale;
+  const strokeFace = () => {
+    context.beginPath();
+    context.arc(
+      centreX,
+      centreY,
+      radius,
+      base - PADDLE_ARC_HALF_ANGLE,
+      base + PADDLE_ARC_HALF_ANGLE,
+    );
+    context.stroke();
+  };
+
   context.lineCap = 'round';
-  context.beginPath();
-  context.arc(
-    centreX,
-    centreY,
-    radius,
-    base - PADDLE_ARC_HALF_ANGLE,
-    base + PADDLE_ARC_HALF_ANGLE,
-  );
-  context.stroke();
+
+  if (glow > 0) {
+    const alpha = context.globalAlpha;
+    context.globalAlpha = alpha * glow * 0.45;
+    context.lineWidth = PADDLE_THICKNESS * scale * (1 + 2.5 * glow);
+    strokeFace();
+    context.globalAlpha = alpha;
+  }
+
+  context.lineWidth = PADDLE_THICKNESS * scale;
+  strokeFace();
   // Put the cap back. `lineCap` is context state, not path state, and the only
   // other stroke in this file is the dashed centre line — which is drawn at the
   // TOP of the next frame, so a round cap left behind here would fatten every
@@ -295,10 +331,10 @@ export function draw(
   const selfIsBottom = !frame.mirrored;
 
   context.strokeStyle = selfIsBottom ? theme.self : theme.opponent;
-  drawPaddleArc(context, px(frame.bottomX), py(BOTTOM_ARC_CY), scale, !frame.mirrored);
+  drawPaddleArc(context, px(frame.bottomX), py(BOTTOM_ARC_CY), scale, !frame.mirrored, frame.bottomFlash);
 
   context.strokeStyle = selfIsBottom ? theme.opponent : theme.self;
-  drawPaddleArc(context, px(frame.topX), py(TOP_ARC_CY), scale, frame.mirrored);
+  drawPaddleArc(context, px(frame.topX), py(TOP_ARC_CY), scale, frame.mirrored, frame.topFlash);
 
   // Ball.
   context.fillStyle = theme.ball;
@@ -307,6 +343,22 @@ export function draw(
   context.fill();
 
   context.globalAlpha = 1;
+
+  // The point wash, tinted by who scored.
+  //
+  // Over the FIELD only, not the whole canvas: the letterbox below the field
+  // is the thumb's, and lighting it up would flash the one part of the screen
+  // the player's own hand is covering. Over the ball and paddles rather than
+  // under them, because it is a moment in time and not a layer of the scene —
+  // and it lands during the post-point freeze, so there is nothing moving
+  // underneath it to obscure.
+  const pointFlash = frame.pointFlash ?? 0;
+  if (pointFlash > 0) {
+    context.globalAlpha = pointFlash * 0.16;
+    context.fillStyle = frame.pointFlashMine ? theme.self : theme.opponent;
+    context.fillRect(offsetX, offsetY, FIELD_W * scale, FIELD_H * scale);
+    context.globalAlpha = 1;
+  }
 
   if (frame.countdown > 0) {
     context.fillStyle = theme.text;

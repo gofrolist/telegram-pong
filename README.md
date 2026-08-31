@@ -459,6 +459,87 @@ pairing is *faster* than the old one at every hit count a rally actually reaches
 number it converges on came down, and 132 was never reached in play anyway. Top
 speed, not acceleration, is what the far paddle charges for.
 
+### Predicted events
+
+Everything continuous — where the ball is, where the paddles are — comes off
+the reconciled world and is drawn straight from it. What that world cannot
+carry is the *moment* something happened: a bounce is a sign change the eye has
+to infer, and a point is a numeral ticking over behind the play. Those ride
+Colyseus 0.18's optimistic event channels (`predict.defineEvent`), ported from
+the official [air-hockey demo], which is where this pattern was taken from.
+
+A channel is declared once, predicted from inside the reconciler step with
+`ctx.predict(...)`, and settled against the server. Two properties are what
+make it worth using rather than diffing replicated state:
+
+- **`ctx.predict` is live-only by construction.** A rollback replay re-derives
+  the same bounce a dozen times per correction and every one of those is
+  silently skipped, so the cue fires exactly once. A state diff would need its
+  own dedupe, and would get it wrong on the reconcile.
+- **Settlement is anchored to the ack stream, not to a clock.** An entry
+  rejects only once the server has processed past the tick that predicted it
+  without saying anything. No RTT estimate, and nothing that false-rejects
+  because the link got slow.
+
+Both channels settle off replicated state rather than a new broadcast, so the
+server is untouched: a point confirms when `meta.scoreBottom`/`scoreTop`
+increases, a hit when `meta.rallyHits` does. `confirm()` returning zero means
+the server saw an event this client never predicted, and the cue is played then
+instead, flagged as the late one.
+
+**The near plane predicts at every latency; the far plane only under the
+cliff.** This is the same ~129ms figure from the section above, read as a
+policy instead of a description, and it is the one place this build
+deliberately diverges from the demo it copied. The ball keeps being predicted
+through the opponent's paddle either way — declining to do that was measured
+and reverted. What is gated is the discrete *feedback*, because the two fail
+differently: a ball that curves the wrong way for 65ms eases itself out, and a
+haptic buzz for a point the far paddle turns out to have saved cannot be taken
+back. So the ball takes the bet and the buzz does not, and above the cliff the
+far-plane cue simply arrives with the server's word for it.
+
+**The score numerals stay authoritative.** The demo hides its puck and
+celebrates optimistically; this does not, for the same asymmetry. A wrong buzz
+is a signal the player has already felt and forgotten; a score that reads 4-3
+and then goes back to 3-3 is a signal they are still looking at. At a healthy
+lead the numeral trails the cue by the `lead ms` column, ~170ms, which that
+column has always described as invisible.
+
+Measured by `prediction.integration.test.ts` at 150ms RTT — past the cliff, so
+both regimes are exercised in one rally:
+
+```
+3892ms hit near predicted | 6164ms hit far LATE
+7818ms hit near predicted | 10031ms hit far LATE
+```
+
+One cue per hit and no more: the near-plane pair predicted, the far-plane pair
+withheld and delivered on the server's word. What the test asserts is that
+something fired, that at least one cue was predicted (a build whose
+`ctx.predict` never ran would otherwise pass), and — the one that matters —
+that the delivered count matches the server's hit count within one in-flight
+prediction. A confirm that failed to settle its pending entry would report the
+same hit twice, once early and once late, which is a double buzz in the
+player's hand and shows up in no other column of any report.
+
+**It does NOT assert that every near-plane hit is predicted, and the reason is
+worth keeping.** That assertion was written first, on the strength of
+`selfPaddleCorrection` being 0.000 in every run, and it failed about one run in
+five. Our own paddle being exact does not make the CONTACT exact: above the
+cliff the far bounce is a coin flip and its error rides the ball all the way
+down the field, so the ball can arrive at our own paddle ~29 units from where
+the server has it and be predicted to sail past something it actually hit. The
+near cue then arrives late too. That is the far paddle being measured twice,
+not a near-plane regression, and an assertion that calls it one is an
+instrument fault of the kind this README already has a section about.
+
+`predictedHits` / `lateHits` / `rejectedPoints` ride home in the end-of-match
+netcode sample. They are the far-plane misprediction rate *as the player felt
+it*, which the correction columns do not capture: a build that quietly stopped
+predicting events would look identical in every one of them.
+
+[air-hockey demo]: https://github.com/colyseus/air-hockey-demo
+
 ### Controls
 
 Finger tracking along the field; the paddle follows X. Not buttons. Vertical
