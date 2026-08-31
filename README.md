@@ -255,6 +255,49 @@ dropped.
 
 ---
 
+## The invite handshake
+
+An invite-only game with no AI opponent has one failure mode that dwarfs the
+rest: two people trying to meet in a room, on timescales that cannot meet.
+Three defects, all recovered from this deployment's own `events` table.
+
+**The room locked itself from the inside.** `maxClients = 2`, and Colyseus
+locks a room once its seats are taken. A seat held through
+`allowReconnection` still counts — so a player who dropped on the *waiting
+screen* held the door shut for the full 30-second grace, and the other
+player's `joinById` was rejected with `MatchMakeError: room is locked`. That
+window is exactly when the two are trying to find each other. `onDrop` now
+releases the seat when no match is live; there is no match state to preserve,
+and `sideByUser` survives the leave so a returning player keeps their end.
+
+**The match started against an empty seat.** `onJoin` began on
+`players.size === 2`, counting seats rather than people — a player inside
+their grace still holds one with `connected: false`. Room `PK29NHH8`: guest
+joined and dropped in the same second, host tapped the notification ten
+seconds later, the match "started" against nobody and was written as a 0-0
+disconnect 31 seconds after. The host's experience is tapping **Join the
+match** and landing in a finished game. The right predicate,
+`everyoneConnected()`, already existed — `onReconnect` used it, `onJoin` did
+not.
+
+**Only one side was ever notified.** `notifyOpponentWaiting` was the whole of
+`notify.ts`: the host got called back and the guest never did. The guest taps
+a link, lands on an empty table, and closes the app within seconds — quite
+reasonably, since nothing on that screen suggests waiting is rewarded. Room
+`SHDR9TWQ`: guest joined and disconnected in the same second, host arrived 43
+minutes later. `notifyHostReturned` closes the loop, once per room.
+
+### Why the existing test missed all three
+
+`asynchronous invites` covered this flow and passed throughout, because it
+left with `leave(true)` — a **consented** leave, which routes through
+`onLeave`, frees the seat and never touches `allowReconnection`. Nobody closes
+an app that politely. A backgrounded Mini App drops its socket, which is
+`leave(false)`, and every one of these defects lives in that path. The new
+tests use it.
+
+---
+
 ## Deploying
 
 ### Neon
