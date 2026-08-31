@@ -15,15 +15,22 @@
  *     arriving early. Any correction here means the two simulations diverged.
  *  2. The predicted ball must stay close to server truth across a rally. NOT
  *     through the opponent's bounce, though: their paddle crosses its own
- *     contact zone in 68ms of one-way latency, so past ~137ms RTT this client
- *     cannot know whether the ball is coming back, and no amount of
- *     determinism fixes that. The ball's bound is scaled by latency for that
- *     reason; only the local paddle is held to zero.
+ *     12.3-unit contact zone in 65ms of one-way latency, so past ~129ms RTT
+ *     this client cannot know whether the ball is coming back, and no amount
+ *     of determinism fixes that. The ball's bound is scaled by latency for
+ *     that reason; only the local paddle is held to zero.
+ *
+ * **This ran at 75ms RTT until 2026-08-30, not the 150 it claims.**
+ * `COLYSEUS_LATENCY` is a ROUND TRIP that Colyseus halves per direction, and
+ * the harness was handing it a one-way figure — so the bad network this file
+ * exists to test was half as bad as it said. `harness/support.ts` doubles it
+ * now, and the run sits just past the 129ms cliff, which is deliberate: the
+ * local paddle must stay exact even where the far one cannot be known.
  *
  * What this does NOT cover: real packet loss and jitter on a mobile radio.
- * `COLYSEUS_LATENCY` is a fixed one-way delay, and dropping inputs at the
- * sender is not the same as losing them in flight. The acceptance test on two
- * phones on mobile data is still the one that counts; see the README.
+ * `COLYSEUS_LATENCY` is a fixed delay, and dropping inputs at the sender is
+ * not the same as losing them in flight. The acceptance test on two phones on
+ * mobile data is still the one that counts; see the README.
  */
 
 import type { ChildProcess } from 'node:child_process';
@@ -35,6 +42,7 @@ import {
   BALL_MAX_SPEED,
   FIELD_W,
   PADDLE_MAX_SPEED,
+  PATCH_RATE_MS,
   Phase,
   SIDE_BOTTOM,
   SIDE_TOP,
@@ -194,6 +202,18 @@ describe('prediction under 150ms RTT', () => {
     // ball bound below is therefore latency-scaled, not zero — the honest
     // shape of the claim.
     const rttSeconds = (ONE_WAY_LATENCY_MS * 2) / 1000;
+    /**
+     * How far ahead of the replicated world the predicted one runs, in
+     * seconds — a round trip PLUS the patch cadence, not a round trip.
+     *
+     * Two patch intervals, both unavoidable: the ack that retires an input
+     * rides a patch, and the state it is compared against is itself up to one
+     * patch old. Bounding the gap by the round trip alone asserts that the
+     * broadcast is instant, and this test only ever passed that way because it
+     * was running at half the latency it claimed (see the header). Measured
+     * here: ball p95 19.8 against this bound's 24.9.
+     */
+    const leadSeconds = rttSeconds + (2 * PATCH_RATE_MS) / 1000;
     const ballCorrectionBound = BALL_MAX_SPEED * rttSeconds;
     expect(p95(ballCorrections)).toBeLessThan(ballCorrectionBound);
 
@@ -203,12 +223,14 @@ describe('prediction under 150ms RTT', () => {
     // travel in that time, which is what these two assertions check.
     //
     // A paddle capped at PADDLE_MAX_SPEED covers at most
-    // PADDLE_MAX_SPEED * RTT units in a round trip.
+    // PADDLE_MAX_SPEED * lead units while the prediction is out in front.
+    // Kept at the round trip alone, which is the tighter claim and the one
+    // this measures comfortably (p95 3.6 against 28.5).
     expect(p95(paddleErrors)).toBeLessThan(PADDLE_MAX_SPEED * rttSeconds);
 
     // The ball tops out at BALL_MAX_SPEED, and never crosses more than a
-    // fraction of the field in one round trip.
-    expect(p95(ballErrors)).toBeLessThan(BALL_MAX_SPEED * rttSeconds);
+    // fraction of the field while the prediction is that far ahead.
+    expect(p95(ballErrors)).toBeLessThan(BALL_MAX_SPEED * leadSeconds);
     expect(p95(ballErrors)).toBeLessThan(FIELD_W * 0.3);
 
     // And the rally actually happened — otherwise the numbers above would be

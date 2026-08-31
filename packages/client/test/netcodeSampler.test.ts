@@ -32,7 +32,13 @@ const steady = (over: Partial<Record<string, number>> = {}) => () => ({
   driftEma: 0.5,
   driftPeak: 2,
   reconcileSeq: 0,
+  ballCorrection: 0.2,
+  ballVelCorrection: 1,
+  selfPaddleCorrection: 0,
+  oppPaddleCorrection: 0.4,
   leadMs: 170,
+  rttMs: 120,
+  jitterMs: 4,
   ...over,
 });
 
@@ -62,8 +68,8 @@ describe('NetcodeSampler', () => {
     const spiky = new NetcodeSampler();
     const end = run(spiky, 10, (frame) =>
       frame === 300
-        ? { pending: 5, correction: 40, driftEma: 0.1, driftPeak: 40, reconcileSeq: frame, leadMs: 170 }
-        : { pending: 5, correction: 0.1, driftEma: 0.1, driftPeak: 0.2, reconcileSeq: frame, leadMs: 170 },
+        ? steady({ correction: 40, driftEma: 0.1, driftPeak: 40, reconcileSeq: frame })()
+        : steady({ correction: 0.1, driftEma: 0.1, driftPeak: 0.2, reconcileSeq: frame })(),
     );
     const summary = spiky.summarize(end)!;
 
@@ -73,14 +79,9 @@ describe('NetcodeSampler', () => {
     expect(summary.driftPeakMax).toBeGreaterThan(30);
 
     const diverging = new NetcodeSampler();
-    const end2 = run(diverging, 10, (frame) => ({
-      pending: 5,
-      correction: 9,
-      driftEma: 9,
-      driftPeak: 10,
-      reconcileSeq: frame,
-      leadMs: 170,
-    }));
+    const end2 = run(diverging, 10, (frame) =>
+      steady({ correction: 9, driftEma: 9, driftPeak: 10, reconcileSeq: frame })(),
+    );
     const summary2 = diverging.summarize(end2)!;
 
     // Here the persistent component IS the story.
@@ -119,5 +120,51 @@ describe('NetcodeSampler', () => {
     }
 
     expect(sampler.summarize(now)!.frameMaxMs).toBeLessThan(100);
+  });
+
+  it('splits the correction by what it was on, so a reversal is not read as a teleport', () => {
+    // `correctionMax` is the worst delta across a pose that mixes positions
+    // with velocities, so a mispredicted bounce reports ~2x the ball's speed
+    // and looks, in a table, like a ball crossing the field. The split is what
+    // says it was `ball.vx`, and that the local paddle stayed exact.
+    const sampler = new NetcodeSampler();
+    const end = run(
+      sampler,
+      10,
+      steady({ correction: 184, ballCorrection: 2.1, ballVelCorrection: 184, oppPaddleCorrection: 6 }),
+    );
+    const summary = sampler.summarize(end)!;
+
+    expect(summary.correctionMax).toBeCloseTo(184);
+    expect(summary.ballVelCorrMax).toBeCloseTo(184);
+    expect(summary.ballCorrMax).toBeCloseTo(2.1);
+    expect(summary.oppPaddleCorrMax).toBeCloseTo(6);
+    // The one that must stay at zero: our own paddle replays our own inputs.
+    expect(summary.selfPaddleCorrMax).toBe(0);
+  });
+
+  it('reads the link separately from the queue', () => {
+    // Unacked inputs are the round trip PLUS any backlog, and only the first is
+    // the network's. 15 pending on a 120ms link is ~11 inputs of queue that
+    // nothing will drain; the same 15 on a 480ms link is just distance.
+    const sampler = new NetcodeSampler();
+    const end = run(sampler, 10, steady({ pending: 15, rttMs: 120, jitterMs: 7 }));
+    const summary = sampler.summarize(end)!;
+
+    expect(summary.rttMean).toBeCloseTo(120);
+    expect(summary.rttP95).toBeCloseTo(120);
+    expect(summary.jitterMean).toBeCloseTo(7);
+    expect(summary.pendingMean).toBeCloseTo(15);
+  });
+
+  it('does not average in the clock\'s "no sample yet" zero', () => {
+    // `smoothedRtt()` reads 0 until its first RTT-valid sample lands. Treating
+    // that as a 0ms link would report a fast connection for a match that was
+    // too short to measure one.
+    const sampler = new NetcodeSampler();
+    const end = run(sampler, 10, (frame) => steady({ rttMs: frame < 300 ? 0 : 200 })());
+    const summary = sampler.summarize(end)!;
+
+    expect(summary.rttMean).toBeCloseTo(200);
   });
 });
