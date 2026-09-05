@@ -17,17 +17,17 @@
     "@pong/game-core": "workspace:*",
     "@telegram-apps/sdk": "^3.11.8",
     "@telegram-apps/sdk-react": "^3.3.9",
-    "i18next": "^26.4.0",
+    "i18next": "^26.4.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "react-i18next": "^17.0.12"
+    "react-i18next": "^17.0.13"
   },
   "devDependencies": {
     "@telegram-apps/init-data-node": "^2.0.10",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.4",
-    "@vitejs/plugin-react": "^6.1.0",
-    "tsx": "^4.23.12",
+    "@vitejs/plugin-react": "^6.1.1",
+    "tsx": "^4.23.13",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",
     "vite-plugin-mkcert": "^2.1.0",
